@@ -1,0 +1,13 @@
+{
+  "year": 2027,
+  "source": "NSE published trading holidays calendar (preliminary placeholder; refresh once 2027 calendar is published)",
+  "last_updated": "2025-12-15",
+  "note": "Approximate fixed-date holidays only. Movable holidays (Holi, Diwali, etc.) must be filled in once NSE publishes the 2027 calendar.",
+  "holidays": [
+    "2027-01-26",
+    "2027-05-01",
+    "2027-08-15",
+    "2027-10-02",
+    "2027-12-25"
+  ]
+}

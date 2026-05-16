@@ -1,0 +1,143 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "papertrade-india"
+version = "0.1.0.dev0"
+description = "Production-grade simulated broker for NSE/BSE paper trading"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Mirza" },
+]
+keywords = [
+    "nse",
+    "bse",
+    "india",
+    "paper-trading",
+    "broker",
+    "trading",
+    "stock-market",
+    "algotrading",
+    "yfinance",
+    "mcp",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+
+dependencies = [
+    "yfinance>=0.2.30",
+]
+
+[project.optional-dependencies]
+# Fallback NSE data source. Optional because it scrapes NSE and can be
+# fragile; users on stable networks with only yfinance are usually fine.
+jugaad = [
+    "jugaad-data>=0.27",
+]
+
+# CLI for inspecting account/positions/orders
+cli = [
+    "typer>=0.12",
+    "rich>=13.7",
+]
+
+# MCP server example (so any LLM agent can use the broker as a tool)
+mcp = [
+    "fastmcp>=0.3",
+]
+
+# Dev / test stack
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "hypothesis>=6.100",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-org/papertrade-india"
+Documentation = "https://github.com/your-org/papertrade-india#readme"
+Repository = "https://github.com/your-org/papertrade-india"
+Issues = "https://github.com/your-org/papertrade-india/issues"
+Changelog = "https://github.com/your-org/papertrade-india/blob/main/CHANGELOG.md"
+
+[project.scripts]
+papertrade-india = "papertrade_india.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/papertrade_india"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/papertrade_india",
+    "tests",
+    "examples",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+]
+
+# ── Test config ────────────────────────────────────────────────────────
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-config",
+    "--strict-markers",
+]
+markers = [
+    "integration: integration tests against real SQLite (not network)",
+    "e2e: end-to-end tests requiring real network/yfinance (opt-in)",
+]
+
+[tool.coverage.run]
+source = ["src/papertrade_india"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
+
+# ── Lint / format ─────────────────────────────────────────────────────
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
+# E501: long lines OK in docstrings/SQL
+# SIM102: collapsing the market-closed-AND-MARKET check loses readability
+ignore = ["E501", "SIM102"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+ignore_missing_imports = true
