@@ -200,6 +200,209 @@ def expire_day_orders(
     console.print(f"[green]Expired {n} DAY order(s).[/green]")
 
 
+@app.command("ledger")
+def ledger(
+    db: str = typer.Option("data/india_paper.db", help="SQLite DB path"),
+    account_id: str = typer.Option("default", "--account", help="Account ID"),
+    limit: int = typer.Option(50, help="Max rows to show, newest first"),
+) -> None:
+    """Show recent rows from the immutable cash-movement ledger."""
+    b = _broker(db, account_id)
+    movements = b.get_cash_movements(limit=limit)
+    if not movements:
+        console.print("[yellow]No cash movements.[/yellow]")
+        return
+    table = Table(title=f"Cash ledger ({account_id}, latest {len(movements)})")
+    for col in ("Recorded", "Reason", "Amount", "Symbol", "Order", "Notes"):
+        table.add_column(col)
+    for m in movements:
+        sign = "[green]" if m.amount >= 0 else "[red]"
+        table.add_row(
+            m.recorded_at.strftime("%Y-%m-%d %H:%M:%S"),
+            m.reason,
+            f"{sign}₹{m.amount:,.2f}[/]",
+            m.symbol or "-",
+            (m.order_id or "")[:8] or "-",
+            (m.notes or "")[:40],
+        )
+    console.print(table)
+
+
+@app.command("verify-invariant")
+def verify_invariant(
+    db: str = typer.Option("data/india_paper.db", help="SQLite DB path"),
+    account_id: str = typer.Option("default", "--account", help="Account ID"),
+) -> None:
+    """Assert ``account.cash == sum(cash_movements)``. Exit 0 if OK, 3 if drift."""
+    b = _broker(db, account_id)
+    if b.verify_cash_invariant():
+        a = b.get_account()
+        console.print(
+            f"[green]✓[/green] Cash invariant holds. "
+            f"Cash = ₹{a.cash:,.2f}."
+        )
+        raise typer.Exit(code=0)
+    a = b.get_account()
+    movements_sum = sum(m.amount for m in b.get_cash_movements(limit=10**9))
+    console.print(
+        f"[red]✗ Cash invariant broken![/red]\n"
+        f"  account.cash      = ₹{a.cash:,.2f}\n"
+        f"  sum(movements)    = ₹{movements_sum:,.2f}\n"
+        f"  drift             = ₹{a.cash - movements_sum:,.2f}\n"
+        f"This indicates a bug — file an issue."
+    )
+    raise typer.Exit(code=3)
+
+
+@app.command("events")
+def events(
+    db: str = typer.Option("data/india_paper.db", help="SQLite DB path"),
+    account_id: str = typer.Option("default", "--account", help="Account ID"),
+    limit: int = typer.Option(50, help="Max rows, newest first"),
+    event_type: str | None = typer.Option(
+        None, "--type",
+        help="Filter by event type, e.g. 'order_filled'",
+    ),
+) -> None:
+    """Recent rows from the persisted event log."""
+    b = _broker(db, account_id)
+    types = (event_type,) if event_type else None
+    rows = b.get_events(limit=limit, event_types=types)
+    if not rows:
+        console.print("[yellow]No events.[/yellow]")
+        return
+    table = Table(title=f"Events ({account_id}, latest {len(rows)})")
+    for col in ("Recorded", "Type", "Order", "Payload"):
+        table.add_column(col)
+    for e in rows:
+        # Compact payload — full JSON is too noisy for a terminal table.
+        payload_summary = ", ".join(
+            f"{k}={v}" for k, v in list(e.payload.items())[:3]
+        )
+        if len(e.payload) > 3:
+            payload_summary += " …"
+        table.add_row(
+            e.recorded_at.strftime("%Y-%m-%d %H:%M:%S"),
+            e.event_type,
+            (e.order_id or "")[:8] or "-",
+            payload_summary or "-",
+        )
+    console.print(table)
+
+
+@app.command("phase")
+def phase(
+    db: str = typer.Option("data/india_paper.db", help="SQLite DB path"),
+    account_id: str = typer.Option("default", "--account", help="Account ID"),
+) -> None:
+    """Show the current NSE session phase (live time, IST)."""
+    b = _broker(db, account_id)
+    p = b.current_session_phase()
+    next_open = b.calendar.next_open()
+    console.print(
+        f"Current phase: [cyan]{p.value}[/cyan]\n"
+        f"Next REGULAR open: {next_open.isoformat()}"
+    )
+
+
+@app.command("status")
+def status(
+    db: str = typer.Option("data/india_paper.db", help="SQLite DB path"),
+    account_id: str = typer.Option("default", "--account", help="Account ID"),
+    ledger_rows: int = typer.Option(5, help="Recent ledger rows to show"),
+    event_rows: int = typer.Option(5, help="Recent events to show"),
+) -> None:
+    """Consolidated audit panel: account + positions + ledger + events + invariant.
+
+    One command instead of five. Use this as the first thing you run
+    when something looks wrong; everything you'd want to inspect at a
+    glance is here.
+
+    Exit code is 0 normally, 3 if the cash invariant is broken — same
+    contract as ``verify-invariant`` so this command can also be used
+    in a cron / health-check.
+    """
+    b = _broker(db, account_id)
+
+    # Account summary
+    a = b.get_account()
+    acct = Table(title=f"Account {a.account_id}", show_header=False)
+    acct.add_column("k", style="cyan")
+    acct.add_column("v", justify="right")
+    for k, v in (
+        ("Equity", f"₹{a.equity:,.2f}"),
+        ("Cash", f"₹{a.cash:,.2f}"),
+        ("Portfolio value", f"₹{a.portfolio_value:,.2f}"),
+        ("Buying power", f"₹{a.buying_power:,.2f}"),
+        ("Realized P&L", f"₹{a.realized_pl_total:,.2f}"),
+        ("Unrealized P&L", f"₹{a.unrealized_pl_total:,.2f}"),
+        ("Phase", b.current_session_phase().value),
+    ):
+        acct.add_row(k, v)
+    console.print(acct)
+
+    # Positions
+    pos_list = b.get_positions()
+    if pos_list:
+        pt = Table(title=f"Open positions ({len(pos_list)})")
+        for col in ("Symbol", "Qty", "Avg cost", "Mkt", "Unrealized P&L", "Stale?"):
+            pt.add_column(col)
+        for p in pos_list:
+            pt.add_row(
+                p.symbol,
+                f"{p.qty:g}",
+                f"₹{p.avg_cost:,.2f}",
+                f"₹{p.current_price:,.2f}",
+                f"₹{p.unrealized_pl:,.2f} ({p.unrealized_pl_percent:+.2f}%)",
+                "yes" if p.current_price_stale else "no",
+            )
+        console.print(pt)
+    else:
+        console.print("[yellow]No open positions.[/yellow]")
+
+    # Ledger tail
+    movements = b.get_cash_movements(limit=ledger_rows)
+    if movements:
+        lt = Table(title=f"Ledger (latest {len(movements)})")
+        for col in ("Recorded", "Reason", "Amount", "Symbol"):
+            lt.add_column(col)
+        for m in movements:
+            sign = "[green]" if m.amount >= 0 else "[red]"
+            lt.add_row(
+                m.recorded_at.strftime("%Y-%m-%d %H:%M:%S"),
+                m.reason,
+                f"{sign}₹{m.amount:,.2f}[/]",
+                m.symbol or "-",
+            )
+        console.print(lt)
+
+    # Events tail
+    evs = b.get_events(limit=event_rows)
+    if evs:
+        et = Table(title=f"Events (latest {len(evs)})")
+        for col in ("Recorded", "Type", "Order"):
+            et.add_column(col)
+        for e in evs:
+            et.add_row(
+                e.recorded_at.strftime("%Y-%m-%d %H:%M:%S"),
+                e.event_type,
+                (e.order_id or "")[:8] or "-",
+            )
+        console.print(et)
+
+    # Invariant check
+    if b.verify_cash_invariant():
+        console.print("[green]✓ Cash invariant holds.[/green]")
+    else:
+        movements_sum = sum(m.amount for m in b.get_cash_movements(limit=10**9))
+        console.print(
+            f"[red]✗ Cash invariant broken![/red] "
+            f"cash=₹{a.cash:,.2f}  sum(movements)=₹{movements_sum:,.2f}  "
+            f"drift=₹{a.cash - movements_sum:,.2f}"
+        )
+        raise typer.Exit(code=3)
+
+
 @app.command("create-account")
 def create_account(
     db: str = typer.Option("data/india_paper.db", help="SQLite DB path"),

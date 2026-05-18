@@ -22,6 +22,7 @@ Public API
 """
 
 from .broker import IndiaPaperBroker
+from .clock import Clock, ReplayClock, WallClock
 from .corporate_actions import CorporateAction
 from .events import Event
 from .exceptions import (
@@ -65,6 +66,7 @@ from .price_feed import (
     Quote,
     YFinanceProvider,
 )
+from .quickstart import quickstart
 from .risk import RiskConfig, RiskContext, RiskEngine
 from .slippage import SlippageConfig, apply_slippage
 from .symbols import SymbolEntry, SymbolMaster
@@ -118,6 +120,11 @@ __all__ = [
     "BrokerEvent",
     "EventBus",
     "stdlib_log_subscriber",
+    # Tier-A: clocks / quickstart
+    "Clock",
+    "WallClock",
+    "ReplayClock",
+    "quickstart",
     # Exceptions
     "IndiaPaperBrokerError",
     "InsufficientFundsError",

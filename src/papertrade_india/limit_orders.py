@@ -52,11 +52,35 @@ class LimitOrderWatcher(threading.Thread):
         broker: IndiaPaperBroker,
         interval_seconds: float = 5.0,
         daemon: bool = True,
+        idempotency_cleanup_every: int | None = None,
+        idempotency_ttl_hours: int = 24,
     ) -> None:
+        """Construct a watcher.
+
+        Parameters
+        ----------
+        broker:
+            The broker to drive.
+        interval_seconds:
+            Sleep between ticks.
+        daemon:
+            Whether the thread is a daemon (default True; doesn't block
+            process shutdown).
+        idempotency_cleanup_every:
+            When set, every Nth tick the watcher runs
+            ``broker.cleanup_idempotency_keys(idempotency_ttl_hours)`` so
+            users get bounded-table-size for free without setting up
+            their own cron. ``None`` (default) skips it.
+        idempotency_ttl_hours:
+            TTL passed to the cleanup call when enabled.
+        """
         super().__init__(daemon=daemon, name="LimitOrderWatcher")
         self.broker = broker
         self.interval = interval_seconds
         self._stop_event = threading.Event()
+        self._idempotency_cleanup_every = idempotency_cleanup_every
+        self._idempotency_ttl_hours = idempotency_ttl_hours
+        self._tick_count = 0
 
     def run(self) -> None:  # pragma: no cover — exercised via integration
         logger.info(
@@ -75,7 +99,26 @@ class LimitOrderWatcher(threading.Thread):
         Public so tests can drive the watcher deterministically without
         starting a thread.
         """
-        if self.broker.enforce_market_hours and not self.broker.calendar.is_market_open():
+        self._tick_count += 1
+        # Periodic cleanup, opt-in.
+        if (
+            self._idempotency_cleanup_every is not None
+            and self._tick_count % self._idempotency_cleanup_every == 0
+        ):
+            try:
+                n = self.broker.cleanup_idempotency_keys(
+                    hours=self._idempotency_ttl_hours,
+                )
+                if n:
+                    logger.info(
+                        "Idempotency cleanup: pruned %d expired key(s)", n,
+                    )
+            except Exception as e:  # noqa: BLE001 — never let cleanup kill the loop
+                logger.exception("Idempotency cleanup failed: %s", e)
+
+        if self.broker.enforce_market_hours and not self.broker.calendar.is_market_open(
+            self.broker.clock.now()
+        ):
             return 0
 
         pending = [

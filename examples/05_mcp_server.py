@@ -114,5 +114,67 @@ def cancel_all_orders() -> dict:
     return {"cancelled": broker.cancel_all_orders()}
 
 
+# ── Tier-3 surfaces ───────────────────────────────────────────────────
+
+
+@mcp.tool()
+def get_session_phase() -> dict:
+    """Current NSE session phase (PRE_OPEN / REGULAR / POST_CLOSE / CLOSED).
+
+    Useful as a guard before submitting market orders — only REGULAR
+    accepts market fills; LIMIT orders queue in any phase.
+    """
+    return {"phase": broker.current_session_phase().value}
+
+
+@mcp.tool()
+def get_cash_ledger(limit: int = 50) -> list[dict]:
+    """Recent immutable cash-movement rows, newest first.
+
+    Each row is one of: initial_capital, buy_principal, buy_fees,
+    sell_principal, sell_fees, dividend, adjustment.
+    """
+    return [
+        {
+            "recorded_at": m.recorded_at.isoformat(),
+            "amount": m.amount,
+            "reason": m.reason,
+            "symbol": m.symbol,
+            "order_id": m.order_id,
+            "notes": m.notes,
+        }
+        for m in broker.get_cash_movements(limit=limit)
+    ]
+
+
+@mcp.tool()
+def get_recent_events(limit: int = 50, event_type: str | None = None) -> list[dict]:
+    """Recent broker events from the persisted log.
+
+    Filter by ``event_type`` (e.g. ``"order_filled"``) when set.
+    """
+    types = (event_type,) if event_type else None
+    return [
+        {
+            "recorded_at": e.recorded_at.isoformat(),
+            "event_type": e.event_type,
+            "order_id": e.order_id,
+            "payload": e.payload,
+        }
+        for e in broker.get_events(limit=limit, event_types=types)
+    ]
+
+
+@mcp.tool()
+def verify_cash_invariant() -> dict:
+    """Audit hook: assert ``account.cash == sum(cash_movements)``.
+
+    Returns a structured result. False here indicates a bug — the
+    package's tests prevent this from happening, but exposing the
+    check lets an autonomous agent self-audit.
+    """
+    return {"holds": broker.verify_cash_invariant()}
+
+
 if __name__ == "__main__":  # pragma: no cover
     mcp.run()

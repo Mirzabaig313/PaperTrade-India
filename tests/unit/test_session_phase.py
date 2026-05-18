@@ -108,3 +108,40 @@ def test_broker_current_session_phase(broker, monkeypatch):
 
     broker.calendar = StubCal()
     assert broker.current_session_phase() == SessionPhase.PRE_OPEN
+
+
+
+# ── Phase-aware MarketClosedError ────────────────────────────────────
+
+
+def test_market_closed_error_mentions_current_phase(tmp_path, price_feed):
+    """The error raised on a closed market should name the actual phase
+    (PRE_OPEN / POST_CLOSE / CLOSED), so an autonomous agent can tell
+    "wait 7 minutes for REGULAR" from "wait until tomorrow"."""
+    from papertrade_india import (
+        IndiaPaperBroker,
+        MarketClosedError,
+        NSECalendar,
+        SessionPhase,
+    )
+
+    class StubCal(NSECalendar):
+        def __init__(self):
+            super().__init__()
+
+        def is_market_open(self, dt=None):
+            return False
+
+        def current_phase(self, dt=None):
+            return SessionPhase.PRE_OPEN
+
+    broker = IndiaPaperBroker(
+        initial_capital=100_000,
+        db_path=tmp_path / "phase.db",
+        account_id="phase",
+        price_feed=price_feed,
+        calendar=StubCal(),
+        enforce_market_hours=True,
+    )
+    with pytest.raises(MarketClosedError, match="pre_open"):
+        broker.buy("RELIANCE", 1)

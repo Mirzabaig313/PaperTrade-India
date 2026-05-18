@@ -50,6 +50,7 @@ from . import corporate_actions as _corporate_actions
 from . import events as _events
 from . import idempotency as _idempotency
 from . import ledger as _ledger
+from .clock import Clock, WallClock
 from .exceptions import (
     AccountNotFoundError,
     IdempotencyConflict,
@@ -123,6 +124,7 @@ class IndiaPaperBroker(BrokerInterface):
         enforce_fresh_prices: bool = False,
         partial_fill_config: PartialFillConfig | None = None,
         event_bus: EventBus | None = None,
+        clock: Clock | None = None,
     ) -> None:
         """Construct a broker bound to ``account_id`` in ``db_path``.
 
@@ -200,6 +202,8 @@ class IndiaPaperBroker(BrokerInterface):
         # Events queued during a transaction; drained to the bus after
         # commit so subscribers never see uncommitted state.
         self._pending_events: list[BrokerEvent] = []
+        # Clock: WallClock by default; ReplayClock for backtests.
+        self._clock: Clock = clock or WallClock()
 
         self._ensure_account_exists(initial_capital, strict_open=strict_open)
 
@@ -217,8 +221,25 @@ class IndiaPaperBroker(BrokerInterface):
         so date-versioned schedules apply.
         """
         return IndianFeeEngine(
-            self.fee_schedule.config_on(datetime.now(IST).date())
+            self.fee_schedule.config_on(self._clock.now().date())
         )
+
+    # ── Clock helpers ──────────────────────────────────────────────────
+
+    def _now_iso(self) -> str:
+        """ISO timestamp of the broker's current 'now' (clock-aware).
+
+        Replaces direct ``self._now_iso()`` calls so a
+        ``ReplayClock`` can drive the broker deterministically in
+        backtests.
+        """
+        return self._clock.now().isoformat()
+
+    @property
+    def clock(self) -> Clock:
+        """The clock this broker uses. WallClock by default; ReplayClock
+        for backtests."""
+        return self._clock
 
     # ── Tier-3: event emission ─────────────────────────────────────────
 
@@ -240,7 +261,7 @@ class IndiaPaperBroker(BrokerInterface):
         block, see ``_emit_event_now`` which queues for post-commit
         delivery.
         """
-        recorded_at = datetime.now(IST).isoformat()
+        recorded_at = self._now_iso()
         _events.emit(
             conn,
             event_type=event_type,
@@ -255,6 +276,7 @@ class IndiaPaperBroker(BrokerInterface):
                 account_id=self.account_id,
                 order_id=order_id,
                 payload=dict(payload or {}),
+                recorded_at=datetime.fromisoformat(recorded_at),
             )
         )
 
@@ -319,7 +341,7 @@ class IndiaPaperBroker(BrokerInterface):
                         f"Account {self.account_id!r} does not exist in "
                         f"{self.persistence.db_path}"
                     )
-                now = datetime.now(IST).isoformat()
+                now = self._now_iso()
                 conn.execute(
                     "INSERT INTO account (account_id, cash, created_at) "
                     "VALUES (?, ?, ?)",
@@ -415,7 +437,7 @@ class IndiaPaperBroker(BrokerInterface):
         )
         self._risk_check(side, symbol, qty, risk_price_for_check)
 
-        market_open = self.calendar.is_market_open()
+        market_open = self.calendar.is_market_open(self._clock.now())
         # When the market is closed: MARKET orders are rejected, LIMIT
         # orders fall through and queue for next session (this is how
         # after-market orders work at real Indian brokers).
@@ -424,9 +446,11 @@ class IndiaPaperBroker(BrokerInterface):
             and not market_open
             and order_type == OrderType.MARKET
         ):
+            phase = self.calendar.current_phase(self._clock.now())
             raise MarketClosedError(
-                f"Cannot fill MARKET order — NSE closed. "
-                f"Next open: {self.calendar.next_open()}"
+                f"Cannot fill MARKET order — current phase: {phase.value}. "
+                f"Next REGULAR open: {self.calendar.next_open(self._clock.now())}. "
+                f"Use a LIMIT order to queue for the next session."
             )
 
         if order_type == OrderType.MARKET:
@@ -513,7 +537,7 @@ class IndiaPaperBroker(BrokerInterface):
         with self.persistence.transaction() as conn:
             _idempotency.store(
                 conn, self.account_id, key, rh, order_id,
-                datetime.now(IST).isoformat(),
+                self._now_iso(),
             )
 
     def cleanup_idempotency_keys(self, hours: int = 24) -> int:
@@ -635,7 +659,7 @@ class IndiaPaperBroker(BrokerInterface):
             symbol=symbol,
         )
         order_id = uuid.uuid4().hex[:12]
-        now = datetime.now(IST).isoformat()
+        now = self._now_iso()
         # Date-versioned fee schedule: use the trade-date config.
         fee_engine = self._fee_engine_for(now)
         fees = fee_engine.calculate(side, qty, price, self.default_exchange)
@@ -926,7 +950,7 @@ class IndiaPaperBroker(BrokerInterface):
         time_in_force: str,
     ) -> Order:
         order_id = uuid.uuid4().hex[:12]
-        now = datetime.now(IST).isoformat()
+        now = self._now_iso()
 
         with self.persistence.transaction() as conn:
             self._record_order(
@@ -1007,7 +1031,7 @@ class IndiaPaperBroker(BrokerInterface):
             limit_price=order.limit_price,
             symbol=order.symbol,
         )
-        now = datetime.now(IST).isoformat()
+        now = self._now_iso()
         fee_engine = self._fee_engine_for(now)
 
         # How much to fill this tick.
@@ -1322,7 +1346,7 @@ class IndiaPaperBroker(BrokerInterface):
                 "WHERE id = ? AND account_id = ? AND status IN (?, ?)",
                 (
                     OrderStatus.CANCELLED.value,
-                    datetime.now(IST).isoformat(),
+                    self._now_iso(),
                     order_id,
                     self.account_id,
                     OrderStatus.PENDING.value,
@@ -1368,7 +1392,7 @@ class IndiaPaperBroker(BrokerInterface):
                 "AND time_in_force = 'DAY'",
                 (
                     OrderStatus.EXPIRED.value,
-                    datetime.now(IST).isoformat(),
+                    self._now_iso(),
                     self.account_id,
                     OrderStatus.PENDING.value,
                 ),
@@ -1413,7 +1437,7 @@ class IndiaPaperBroker(BrokerInterface):
                 (self.account_id,),
             )
 
-            now = datetime.now(IST).isoformat()
+            now = self._now_iso()
             if initial_capital is not None:
                 conn.execute(
                     "UPDATE account SET cash = ?, realized_pl_total = 0 "
@@ -1598,8 +1622,8 @@ class IndiaPaperBroker(BrokerInterface):
         if ratio_num <= 0 or ratio_den <= 0:
             raise ValueError("ratio components must be positive integers")
         ratio = Fraction(ratio_num, ratio_den)
-        ex_date = ex_date or datetime.now(IST).date().isoformat()
-        now = datetime.now(IST).isoformat()
+        ex_date = ex_date or self._clock.now().date().isoformat()
+        now = self._now_iso()
 
         with self.persistence.transaction() as conn:
             action_id = _corporate_actions.record_split(
@@ -1678,8 +1702,8 @@ class IndiaPaperBroker(BrokerInterface):
         """
         if amount_per_share <= 0:
             raise ValueError("amount_per_share must be positive")
-        ex_date = ex_date or datetime.now(IST).date().isoformat()
-        now = datetime.now(IST).isoformat()
+        ex_date = ex_date or self._clock.now().date().isoformat()
+        now = self._now_iso()
 
         with self.persistence.transaction() as conn:
             action_id = _corporate_actions.record_dividend(
@@ -1744,6 +1768,79 @@ class IndiaPaperBroker(BrokerInterface):
         with self.persistence.read() as conn:
             return _ledger.list_for_account(conn, self.account_id, limit=limit)
 
+    def get_position_basis_breakdown(self, symbol: str) -> dict | None:
+        """Return the open position's cost basis broken into principal vs fees.
+
+        Useful for reconciling against a broker contract note: ``avg_cost``
+        bakes in prorated buy-side fees, but the ledger has the raw
+        components separately. We only count buy-side movements that
+        haven't been reversed by a subsequent sell.
+
+        Returns ``None`` if no open position exists for ``symbol``.
+
+        Returns a dict with::
+
+            {
+                "qty": float,              # current open qty
+                "principal": float,        # qty * avg_cost - fees_in_basis
+                "fees_in_basis": float,    # prorated buy fees still embedded
+                "total_basis": float,      # qty * avg_cost (matches Position.cost_basis)
+                "ledger_buy_principal": float,   # gross buy principal from ledger
+                "ledger_buy_fees": float,        # gross buy fees from ledger
+                "ledger_sell_principal": float,  # gross sell principal from ledger
+                "ledger_sell_fees": float,       # gross sell fees from ledger
+            }
+
+        Mechanics: ``total_basis = qty * avg_cost`` is the definitive
+        figure (avg_cost was maintained against this invariant). We back
+        out ``fees_in_basis`` as the share of total ledger fees that's
+        still embedded in the open qty — proportional to the unsold
+        portion. Sells that closed positions wash everything to zero.
+        """
+        pos = self.get_position(symbol)
+        if pos is None:
+            return None
+
+        with self.persistence.read() as conn:
+            rows = conn.execute(
+                "SELECT reason, COALESCE(SUM(amount), 0) AS total "
+                "FROM cash_movements "
+                "WHERE account_id = ? AND symbol = ? "
+                "GROUP BY reason",
+                (self.account_id, symbol),
+            ).fetchall()
+
+        by_reason = {r["reason"]: float(r["total"]) for r in rows}
+        # ``amount`` is signed; principals are negative on buys, fees too.
+        # Convert to absolute "outflow" magnitudes for readability.
+        buy_principal = abs(by_reason.get("buy_principal", 0.0))
+        buy_fees = abs(by_reason.get("buy_fees", 0.0))
+        sell_principal = abs(by_reason.get("sell_principal", 0.0))
+        sell_fees = abs(by_reason.get("sell_fees", 0.0))
+
+        total_basis = pos.qty * pos.avg_cost
+        # Buy-side fees still embedded in the open qty: proportional to
+        # what remains. If we bought 10 with ₹X fees and sold 3, only
+        # 7/10 of those fees are still in the basis.
+        # Use the running ledger buy_principal as the denominator (gross).
+        if buy_principal > 0:
+            open_share = (total_basis / max(buy_principal + buy_fees, 1e-9))
+            fees_in_basis = min(buy_fees * open_share, total_basis)
+        else:
+            fees_in_basis = 0.0
+        principal_in_basis = total_basis - fees_in_basis
+
+        return {
+            "qty": pos.qty,
+            "principal": principal_in_basis,
+            "fees_in_basis": fees_in_basis,
+            "total_basis": total_basis,
+            "ledger_buy_principal": buy_principal,
+            "ledger_buy_fees": buy_fees,
+            "ledger_sell_principal": sell_principal,
+            "ledger_sell_fees": sell_fees,
+        }
+
     def verify_cash_invariant(self, tolerance: float = 0.01) -> bool:
         """Assert ``account.cash == sum(cash_movements.amount)``.
 
@@ -1753,6 +1850,11 @@ class IndiaPaperBroker(BrokerInterface):
         Run this from tests, audits, or a periodic health check. A False
         result means there's a code path mutating ``account.cash``
         without writing a matching ledger row, which is a bug.
+
+        On drift (returning False) we also log a structured WARN with
+        the magnitude and the most recent ledger rows so the failure
+        is debuggable in the wild without needing to re-run with debug
+        flags.
         """
         with self.persistence.read() as conn:
             cash = conn.execute(
@@ -1760,7 +1862,20 @@ class IndiaPaperBroker(BrokerInterface):
                 (self.account_id,),
             ).fetchone()["cash"]
             ledger_total = _ledger.sum_for_account(conn, self.account_id)
-        return abs(cash - ledger_total) <= tolerance
+
+        drift = cash - ledger_total
+        if abs(drift) <= tolerance:
+            return True
+
+        # Drift exceeds tolerance. Log enough context for triage.
+        recent = self.get_cash_movements(limit=5)
+        logger.warning(
+            "Cash invariant broken on account=%s: cash=%.4f, "
+            "sum(movements)=%.4f, drift=%.4f. Recent movements: %s",
+            self.account_id, cash, ledger_total, drift,
+            [(m.recorded_at.isoformat(), m.reason, m.amount) for m in recent],
+        )
+        return False
 
     # ── Tier-3: event log + session phase ──────────────────────────────
 
@@ -1780,8 +1895,8 @@ class IndiaPaperBroker(BrokerInterface):
             )
 
     def current_session_phase(self) -> SessionPhase:
-        """The active NSE session phase right now (IST)."""
-        return self.calendar.current_phase()
+        """The active NSE session phase at the broker's clock."""
+        return self.calendar.current_phase(self._clock.now())
 
     # ── Utilities ───────────────────────────────────────────────────────
 
