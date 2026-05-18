@@ -33,7 +33,6 @@ import pytest
 
 from papertrade_india import IndiaPaperBroker
 
-
 # Encoded contract: Alpaca's TradingService methods that an agent uses.
 # Shape: { method_name: { "required": [params], "optional": [params] } }
 ALPACA_CONTRACT: dict[str, dict[str, list[str]]] = {

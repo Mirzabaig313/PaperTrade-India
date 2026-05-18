@@ -63,7 +63,7 @@ from .exceptions import (
 )
 from .fees import FeeConfig, FeeSchedule, IndianFeeEngine
 from .interface import BrokerInterface
-from .market_hours import IST, NSECalendar, SessionPhase
+from .market_hours import NSECalendar, SessionPhase
 from .models import (
     Account,
     Exchange,
@@ -83,7 +83,6 @@ from .symbols import SymbolMaster
 
 logger = logging.getLogger(__name__)
 
-# Floating-point tolerance for "is this position effectively closed".
 _QTY_EPSILON = 1e-9
 
 
@@ -180,8 +179,6 @@ class IndiaPaperBroker(BrokerInterface):
         self.price_feed = price_feed or PriceFeed()
         self.calendar = calendar or NSECalendar()
 
-        # Wrap a bare FeeConfig in a single-entry FeeSchedule so the
-        # rest of the broker can call self.fee_schedule.config_on(date).
         schedule: FeeSchedule
         if fee_config is None:
             schedule = FeeSchedule(default=FeeConfig())
@@ -191,18 +188,13 @@ class IndiaPaperBroker(BrokerInterface):
             schedule = FeeSchedule(default=fee_config)
         self.fee_schedule = schedule
 
-        # Tier-1 collaborators. All-defaults = legacy behavior.
         self.slippage_config = slippage_config or SlippageConfig(bps=0.0)
         self.risk_engine = RiskEngine(risk_config or RiskConfig())
         self.symbol_master = symbol_master or SymbolMaster(strict=False)
 
-        # Tier-3 collaborators. All-defaults = legacy behavior.
         self.partial_fill_config = partial_fill_config or PartialFillConfig()
         self.events: EventBus = event_bus or EventBus()
-        # Events queued during a transaction; drained to the bus after
-        # commit so subscribers never see uncommitted state.
         self._pending_events: list[BrokerEvent] = []
-        # Clock: WallClock by default; ReplayClock for backtests.
         self._clock: Clock = clock or WallClock()
 
         self._ensure_account_exists(initial_capital, strict_open=strict_open)
@@ -347,8 +339,6 @@ class IndiaPaperBroker(BrokerInterface):
                     "VALUES (?, ?, ?)",
                     (self.account_id, float(initial_capital), now),
                 )
-                # Seed the ledger with the opening deposit so
-                # sum(movements) == cash from day one.
                 _ledger.record(
                     conn,
                     account_id=self.account_id,
@@ -409,7 +399,6 @@ class IndiaPaperBroker(BrokerInterface):
         if order_type == OrderType.LIMIT and limit_price is not None and limit_price <= 0:
             raise InvalidOrderError("limit_price must be positive")
 
-        # Idempotency replay check (cheap, runs before any other I/O).
         if idempotency_key is not None:
             replay = self._idempotency_replay(
                 key=idempotency_key,
@@ -423,14 +412,9 @@ class IndiaPaperBroker(BrokerInterface):
             if replay is not None:
                 return replay
 
-        # Symbol master validation: rejects delisted symbols always;
-        # rejects unknown symbols only when SymbolMaster(strict=True).
         with self.persistence.read() as conn:
             self.symbol_master.validate(conn, symbol, self.default_exchange)
 
-        # Risk controls (kill switch, whitelist, notional caps).
-        # We run these *before* the price-feed call to fail fast on
-        # rejected symbols / killed brokers.
         risk_price_for_check = (
             limit_price if order_type == OrderType.LIMIT and limit_price is not None
             else self._safe_last_price_for_risk(symbol)
@@ -438,9 +422,6 @@ class IndiaPaperBroker(BrokerInterface):
         self._risk_check(side, symbol, qty, risk_price_for_check)
 
         market_open = self.calendar.is_market_open(self._clock.now())
-        # When the market is closed: MARKET orders are rejected, LIMIT
-        # orders fall through and queue for next session (this is how
-        # after-market orders work at real Indian brokers).
         if (
             self.enforce_market_hours
             and not market_open
@@ -461,7 +442,6 @@ class IndiaPaperBroker(BrokerInterface):
                 symbol, qty, side, limit_price, time_in_force,
             )
 
-        # Persist the idempotency mapping if a key was provided.
         if idempotency_key is not None:
             self._idempotency_store(
                 key=idempotency_key,
@@ -507,9 +487,6 @@ class IndiaPaperBroker(BrokerInterface):
 
         order = self.get_order(entry.order_id)
         if order is None:
-            # The original order was deleted (rare — likely a manual
-            # reset). Treat the idempotency record as stale and fall
-            # through to a new submission.
             logger.warning(
                 "Idempotency key %s pointed at missing order %s; replaying as new",
                 key, entry.order_id,
@@ -589,7 +566,6 @@ class IndiaPaperBroker(BrokerInterface):
         price_for_check: float,
     ) -> None:
         """Build a RiskContext for the symbol and run the engine."""
-        # Pull existing position + equity from DB in one read.
         existing_qty = 0.0
         existing_avg = 0.0
         with self.persistence.read() as conn:
@@ -606,9 +582,6 @@ class IndiaPaperBroker(BrokerInterface):
                 (self.account_id,),
             ).fetchone()
             cash = equity_row["cash"] if equity_row else 0.0
-        # Equity for risk = cash + sum(position cost-basis). Using
-        # cost-basis (rather than mark-to-market across all positions)
-        # avoids a full price-feed sweep here. Slightly conservative.
         equity = cash + existing_qty * existing_avg
 
         ctx = RiskContext(
@@ -623,8 +596,6 @@ class IndiaPaperBroker(BrokerInterface):
         try:
             self.risk_engine.check(ctx)
         except Exception as e:
-            # Persist the rejection as an event before re-raising. We're
-            # outside any transaction here, so open a small one.
             with self.persistence.transaction() as conn:
                 self._emit_event(
                     conn,
@@ -650,7 +621,6 @@ class IndiaPaperBroker(BrokerInterface):
         """Fill immediately at slippage-adjusted market price."""
         quote = self._get_fill_quote(symbol)
         last_price = quote.price
-        # Slippage is symmetric: BUY pays above last, SELL receives below.
         price = apply_slippage(
             self.slippage_config,
             side=side,
@@ -660,13 +630,9 @@ class IndiaPaperBroker(BrokerInterface):
         )
         order_id = uuid.uuid4().hex[:12]
         now = self._now_iso()
-        # Date-versioned fee schedule: use the trade-date config.
         fee_engine = self._fee_engine_for(now)
         fees = fee_engine.calculate(side, qty, price, self.default_exchange)
 
-        # The transaction context manager rolls back on exception, so any
-        # InsufficientFundsError / InsufficientSharesError raised from
-        # _apply_* propagates out cleanly. No try/except needed here.
         with self.persistence.transaction() as conn:
             position_existed_before = (
                 self._symbol_position_qty(conn, symbol) > 0
@@ -712,7 +678,6 @@ class IndiaPaperBroker(BrokerInterface):
                 executed_at=now,
             )
 
-            # Tier-3 events.
             self._emit_event(
                 conn,
                 event_type="order_submitted",
@@ -761,8 +726,6 @@ class IndiaPaperBroker(BrokerInterface):
             )
 
         order = self.get_order(order_id)
-        # The row was just inserted in a committed transaction; if it's
-        # missing something is gravely wrong.
         assert order is not None, "order disappeared after commit"
         return order
 
@@ -805,8 +768,6 @@ class IndiaPaperBroker(BrokerInterface):
             (cost, self.account_id),
         )
 
-        # Ledger: principal first, then fees. Two rows so analytics can
-        # separate "what I paid for shares" from "what I paid the broker".
         _ledger.record(
             conn,
             account_id=self.account_id,
@@ -837,7 +798,6 @@ class IndiaPaperBroker(BrokerInterface):
             old_qty = existing["qty"]
             old_avg = existing["avg_cost"]
             new_qty = old_qty + qty
-            # Volume-weighted average cost INCLUDING this buy's fees.
             new_avg = ((old_avg * old_qty) + (price * qty) + fees) / new_qty
             conn.execute(
                 "UPDATE positions SET qty = ?, avg_cost = ? "
@@ -845,7 +805,6 @@ class IndiaPaperBroker(BrokerInterface):
                 (new_qty, new_avg, self.account_id, symbol),
             )
         else:
-            # First buy: avg_cost = (price*qty + fees) / qty.
             avg_cost = (price * qty + fees) / qty
             conn.execute(
                 "INSERT INTO positions "
@@ -902,7 +861,6 @@ class IndiaPaperBroker(BrokerInterface):
             (proceeds, realized_pl, self.account_id),
         )
 
-        # Ledger: principal credit + fees debit.
         _ledger.record(
             conn,
             account_id=self.account_id,
@@ -931,8 +889,6 @@ class IndiaPaperBroker(BrokerInterface):
                 (self.account_id, symbol),
             )
         else:
-            # avg_cost on the remaining sleeve is unchanged: a partial
-            # sell doesn't alter the per-share basis of what's left.
             conn.execute(
                 "UPDATE positions SET qty = ? "
                 "WHERE account_id = ? AND symbol = ?",
@@ -1020,9 +976,6 @@ class IndiaPaperBroker(BrokerInterface):
         rather than transitioning to ``FILLED``. Subsequent ticks fill
         the rest.
         """
-        # Optionally re-price using slippage. apply_slippage caps the
-        # result by the limit so we never fill above a buy-limit or
-        # below a sell-limit.
         adjusted_price = apply_slippage(
             self.slippage_config,
             side=order.side,
@@ -1034,7 +987,6 @@ class IndiaPaperBroker(BrokerInterface):
         now = self._now_iso()
         fee_engine = self._fee_engine_for(now)
 
-        # How much to fill this tick.
         remaining = order.qty - order.filled_qty
         if fill_qty is None or fill_qty >= remaining:
             slice_qty = remaining
@@ -1044,8 +996,6 @@ class IndiaPaperBroker(BrokerInterface):
             terminal = False
 
         if slice_qty <= 0:
-            # Nothing to fill (e.g. partial-fill config returned 0 because
-            # remaining is below min_fill_qty). Caller treats as no-op.
             return
 
         fees = fee_engine.calculate(
@@ -1053,7 +1003,6 @@ class IndiaPaperBroker(BrokerInterface):
         )
 
         new_filled_qty = order.filled_qty + slice_qty
-        # Cumulative average fill price across all slices.
         prior_total = order.filled_qty * (order.filled_avg_price or 0.0)
         new_avg_fill = (prior_total + slice_qty * adjusted_price) / new_filled_qty
         new_status = (
@@ -1062,9 +1011,6 @@ class IndiaPaperBroker(BrokerInterface):
         cumulative_fees = order.fees_paid + fees.total
 
         with self.persistence.transaction() as conn:
-            # Claim the order first. Status must be PENDING (first slice)
-            # or PARTIALLY_FILLED (subsequent slices). If another thread
-            # cancelled it, rowcount = 0 and we abort cleanly.
             cur = conn.execute(
                 "UPDATE orders SET status = ?, filled_qty = ?, "
                 "filled_avg_price = ?, fees_paid = ?, realized_pl = ?, "
@@ -1124,7 +1070,6 @@ class IndiaPaperBroker(BrokerInterface):
                 executed_at=now,
             )
 
-            # Tier-3 events.
             position_qty_after = self._symbol_position_qty(conn, order.symbol)
             self._emit_position_events(
                 conn,
@@ -1422,8 +1367,6 @@ class IndiaPaperBroker(BrokerInterface):
                 "DELETE FROM orders WHERE account_id = ?",
                 (self.account_id,),
             )
-            # Belt-and-braces: delete any trades not already cascaded
-            # (e.g. from a legacy schema). No-op on fresh DBs.
             conn.execute(
                 "DELETE FROM trades WHERE account_id = ?",
                 (self.account_id,),
@@ -1453,8 +1396,6 @@ class IndiaPaperBroker(BrokerInterface):
                     notes="Account reset",
                 )
             else:
-                # Reset realized P&L but keep cash. Re-seed ledger so
-                # sum(movements) == cash.
                 cash_row = conn.execute(
                     "SELECT cash FROM account WHERE account_id = ?",
                     (self.account_id,),
@@ -1641,7 +1582,6 @@ class IndiaPaperBroker(BrokerInterface):
                 (self.account_id, symbol),
             ).fetchone()
             if existing is None:
-                # No holding — record the action for audit; nothing to update.
                 logger.info(
                     "SPLIT %s %d:%d recorded; no holding to adjust",
                     symbol, ratio_num, ratio_den,
@@ -1650,7 +1590,6 @@ class IndiaPaperBroker(BrokerInterface):
 
             old_qty = existing["qty"]
             old_avg = existing["avg_cost"]
-            # qty *= ratio; avg_cost /= ratio. Total cost basis preserved.
             new_qty = old_qty * (ratio_num / ratio_den)
             new_avg = old_avg * (ratio_den / ratio_num)
             conn.execute(
@@ -1811,8 +1750,6 @@ class IndiaPaperBroker(BrokerInterface):
             ).fetchall()
 
         by_reason = {r["reason"]: float(r["total"]) for r in rows}
-        # ``amount`` is signed; principals are negative on buys, fees too.
-        # Convert to absolute "outflow" magnitudes for readability.
         buy_principal = abs(by_reason.get("buy_principal", 0.0))
         buy_fees = abs(by_reason.get("buy_fees", 0.0))
         sell_principal = abs(by_reason.get("sell_principal", 0.0))
@@ -1867,7 +1804,6 @@ class IndiaPaperBroker(BrokerInterface):
         if abs(drift) <= tolerance:
             return True
 
-        # Drift exceeds tolerance. Log enough context for triage.
         recent = self.get_cash_movements(limit=5)
         logger.warning(
             "Cash invariant broken on account=%s: cash=%.4f, "

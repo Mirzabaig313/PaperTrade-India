@@ -14,14 +14,13 @@ from datetime import datetime, timedelta
 import pytest
 
 from papertrade_india import (
-    IndiaPaperBroker,
     IST,
+    IndiaPaperBroker,
     LimitOrderWatcher,
     OrderType,
     PriceFeed,
     ReplayClock,
 )
-
 
 pytestmark = pytest.mark.integration
 

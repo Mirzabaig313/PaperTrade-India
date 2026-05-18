@@ -25,7 +25,6 @@ def test_market_buy_emits_submitted_filled_opened(broker, stub_provider):
 
     events = broker.get_events()
     types = [e.event_type for e in events]
-    # Event log is newest-first.
     assert "position_opened" in types
     assert "order_filled" in types
     assert "order_submitted" in types
@@ -147,8 +146,7 @@ def test_subscriber_failure_does_not_break_others(broker, stub_provider):
     stub_provider.set("RELIANCE", 1000)
     broker.buy("RELIANCE", 1)
 
-    # The good subscriber still received events.
-    assert len(good) >= 2  # at least submitted + filled
+    assert len(good) >= 2
 
 
 def test_subscriber_only_sees_committed_events(broker, stub_provider):
@@ -250,7 +248,6 @@ def test_unfiltered_subscriber_sees_all(broker, stub_provider):
     stub_provider.set("RELIANCE", 1000)
     broker.buy("RELIANCE", 1)
     types = {e.event_type for e in everything}
-    # At minimum: submitted, filled, position_opened.
     assert {"order_submitted", "order_filled", "position_opened"} <= types
 
 
@@ -276,7 +273,6 @@ def test_broker_events_carry_recorded_at(broker, stub_provider):
     broker.buy("RELIANCE", 1)
 
     assert all(e.recorded_at is not None for e in received)
-    # Times are monotonically non-decreasing within a single buy.
     times = [e.recorded_at for e in received]
     assert times == sorted(times)
 
@@ -291,7 +287,6 @@ def test_replay_dispatches_persisted_events_chronologically(
     broker.buy("RELIANCE", 1)
     broker.buy("RELIANCE", 1)
 
-    # Subscriber registered AFTER trades — would have missed live events.
     backfill: list[BrokerEvent] = []
     broker.events.subscribe(
         backfill.append,
@@ -304,7 +299,6 @@ def test_replay_dispatches_persisted_events_chronologically(
     )
     assert n == 2
     assert len(backfill) == 2
-    # Replayed events arrive oldest-first.
     times = [e.recorded_at for e in backfill]
     assert times == sorted(times)
 
@@ -318,7 +312,6 @@ def test_replay_respects_since_filter(broker, stub_provider):
     received: list[BrokerEvent] = []
     broker.events.subscribe(received.append)
 
-    # ``since`` set in the future — nothing should replay.
     n = broker.events.replay_from_broker(
         broker, since=datetime.now() + timedelta(hours=1),
     )
@@ -343,7 +336,6 @@ def test_replay_only_hits_subscribers_with_matching_filter(
         filled.append, event_types=("order_filled",),
     )
 
-    # Replay everything from the log; each subscriber filters its own slice.
     broker.events.replay_from_broker(broker)
 
     assert all(e.event_type == "order_submitted" for e in submitted)

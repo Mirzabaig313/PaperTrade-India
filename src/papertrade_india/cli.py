@@ -275,7 +275,6 @@ def events(
     for col in ("Recorded", "Type", "Order", "Payload"):
         table.add_column(col)
     for e in rows:
-        # Compact payload — full JSON is too noisy for a terminal table.
         payload_summary = ", ".join(
             f"{k}={v}" for k, v in list(e.payload.items())[:3]
         )
