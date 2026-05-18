@@ -13,6 +13,10 @@ Why this looks the way it does:
   rollback on any exception.
 - **Foreign keys ON.** Enforced explicitly because SQLite's default is
   off, even on modern versions.
+- **Versioned schema migrations.** ``migrations.run_migrations`` is
+  invoked on first-thread connect. Brand-new DBs run from version 0 to
+  the current head; legacy 0.1.x DBs are detected, stamped at v1, and
+  upgraded forward. See ``migrations.py`` for the full design.
 """
 
 from __future__ import annotations
@@ -23,108 +27,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import corporate_actions as _corporate_actions
-from . import events as _events
-from . import idempotency as _idempotency
-from . import ledger as _ledger
-from . import symbols as _symbols
+from . import migrations as _migrations
 
 PathLike = str | Path
-
-
-SCHEMA = """
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
-
-CREATE TABLE IF NOT EXISTS account (
-    account_id TEXT PRIMARY KEY,
-    -- Cash invariant: never below zero. The broker's _apply_buy() guards
-    -- against overdraft pre-update, so this is a defensive belt-and-braces.
-    cash REAL NOT NULL CHECK(cash >= 0),
-    realized_pl_total REAL NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS positions (
-    account_id TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    exchange TEXT NOT NULL,
-    qty REAL NOT NULL CHECK(qty >= 0),
-    -- avg_cost is the per-share economic cost basis INCLUDING prorated
-    -- buy-side fees. So qty*avg_cost == total cash spent acquiring the
-    -- position. See broker._apply_buy for the maintenance invariant.
-    avg_cost REAL NOT NULL CHECK(avg_cost > 0),
-    entry_date TEXT NOT NULL,
-    PRIMARY KEY (account_id, symbol),
-    FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS orders (
-    id TEXT PRIMARY KEY,
-    account_id TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    exchange TEXT NOT NULL,
-    side TEXT NOT NULL CHECK(side IN ('buy','sell')),
-    qty REAL NOT NULL CHECK(qty > 0),
-    order_type TEXT NOT NULL CHECK(order_type IN ('market','limit')),
-    -- Match the OrderStatus enum values exactly; CHECK keeps stale code
-    -- from inserting a bogus status.
-    status TEXT NOT NULL CHECK(status IN (
-        'pending','filled','partially_filled',
-        'cancelled','rejected','expired'
-    )),
-    filled_qty REAL NOT NULL DEFAULT 0,
-    filled_avg_price REAL,
-    limit_price REAL,
-    fees_paid REAL NOT NULL DEFAULT 0,
-    realized_pl REAL NOT NULL DEFAULT 0,
-    time_in_force TEXT NOT NULL DEFAULT 'DAY',
-    created_at TEXT NOT NULL,
-    filled_at TEXT,
-    cancelled_at TEXT,
-    expired_at TEXT,
-    rejection_reason TEXT,
-    FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_orders_account_status
-    ON orders(account_id, status);
-CREATE INDEX IF NOT EXISTS idx_orders_account_created
-    ON orders(account_id, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS trades (
-    id TEXT PRIMARY KEY,
-    order_id TEXT NOT NULL,
-    account_id TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    side TEXT NOT NULL,
-    qty REAL NOT NULL,
-    price REAL NOT NULL,
-    fees REAL NOT NULL DEFAULT 0,
-    realized_pl REAL NOT NULL DEFAULT 0,
-    executed_at TEXT NOT NULL,
-    -- ON DELETE CASCADE so reset() can drop orders without first having
-    -- to delete trades manually.
-    FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
-    FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_trades_account_executed
-    ON trades(account_id, executed_at DESC);
-"""
-
-
-# Tier-1 add-on schemas. Each lives in its own module for cohesion (the
-# idempotency / symbol-master logic stays alongside its schema), and we
-# concatenate them here so a fresh DB picks them up on first connect.
-EXTENSION_SCHEMAS = (
-    _idempotency.SCHEMA,
-    _symbols.SCHEMA,
-    _ledger.SCHEMA,
-    _corporate_actions.SCHEMA,
-    _events.SCHEMA,
-)
 
 
 class Persistence:
@@ -141,11 +46,16 @@ class Persistence:
         self.db_path = str(db_path)
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
-        # Initialize core + extension schemas on first connection.
+        # Run migrations on first connect. Brand-new DBs apply from v0
+        # to head; legacy DBs are stamped + upgraded forward.
         with self._connect() as conn:
-            conn.executescript(SCHEMA)
-            for ext in EXTENSION_SCHEMAS:
-                conn.executescript(ext)
+            # File-level PRAGMAs that must be set OUTSIDE any transaction
+            # (SQLite refuses ``PRAGMA journal_mode`` inside one). These
+            # used to live in the v1 schema string but moved out when
+            # we adopted versioned migrations.
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            _migrations.run_migrations(conn)
 
     def _connect(self) -> sqlite3.Connection:
         """Return the thread-local connection, creating it lazily."""
@@ -201,3 +111,16 @@ class Persistence:
         if conn is not None:
             conn.close()
             self._local.conn = None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Backwards-compat re-exports.
+#
+# The pre-migrations design exposed a module-level ``SCHEMA`` string
+# and an ``EXTENSION_SCHEMAS`` tuple. Some external tests or scripts
+# may still touch these. They're now thin aliases over the migrations
+# module so behavior is preserved.
+# ──────────────────────────────────────────────────────────────────────
+
+SCHEMA = _migrations._INITIAL_SCHEMA_SQL
+EXTENSION_SCHEMAS: tuple[str, ...] = ()  # everything is in v1 now

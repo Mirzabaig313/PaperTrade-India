@@ -9,6 +9,146 @@ be called out here.
 
 ## [Unreleased]
 
+### Added (Tier-A: completing the package)
+
+#### Backtest replay mode
+- New `clock.py` module with `Clock` Protocol, `WallClock` (default),
+  and `ReplayClock(start_at)` for deterministic backtests.
+- `IndiaPaperBroker(clock=...)` accepts any `Clock`. Every `datetime.now(IST)`
+  call inside the broker now routes through the clock, including order
+  timestamps, ledger `recorded_at`, event `recorded_at`, market-hour
+  checks, session-phase checks, and DAY-tif expiry timestamps.
+- `broker.clock` property exposes the clock; the limit-order watcher
+  uses it for its own market-hour checks.
+- `ReplayClock.advance(timedelta)` and `.set(datetime)` move time
+  forward; backwards moves raise `ValueError` so the simulator's
+  audit log stays monotonic.
+- New example `examples/07_backtest_replay.py` runs a 10-day momentum
+  backtest with no wall-clock waiting.
+
+#### Quickstart factory
+- New `quickstart()` factory returns a safe-by-default broker
+  pre-configured with the Zerodha-delivery preset, 5 bp slippage,
+  strict symbol master with the bundled NSE-30 sample loaded, and
+  stale-price hard-reject ON. Saves first-time users from the
+  multi-parameter cliff.
+
+#### Position basis breakdown
+- New `broker.get_position_basis_breakdown(symbol)` returns
+  `{qty, principal, fees_in_basis, total_basis, ledger_buy_principal,
+  ledger_buy_fees, ledger_sell_principal, ledger_sell_fees}`. Lets
+  users reconcile a position's `avg_cost` against a real broker's
+  contract note.
+
+#### Status CLI command
+- New `papertrade-india status` consolidates account + positions +
+  ledger tail + events tail + invariant check into one Rich panel.
+  Same exit-3-on-drift contract as `verify-invariant` so it can also
+  serve as a cron health check.
+
+#### Watcher idempotency cleanup
+- `LimitOrderWatcher(idempotency_cleanup_every=N, idempotency_ttl_hours=H)`
+  runs `broker.cleanup_idempotency_keys(hours=H)` every Nth tick.
+  Off by default; opt-in for users who don't want to wire their own
+  cron.
+
+#### Invariant logging on drift
+- `verify_cash_invariant()` now emits a structured WARN with the drift
+  amount, the account id, and the most recent 5 ledger rows when it
+  returns False. Triage-friendly out of the box.
+
+#### Alpaca contract test
+- New `tests/integration/test_alpaca_contract.py` pins the "drop-in
+  replacement for Alpaca's TradingService" claim with structural
+  signature checks. Method names, required params, optional params,
+  and Order/Account/Position field shapes are all verified.
+
+### Tests
+- 32 new tests across clock, replay-broker, quickstart, basis
+  breakdown, status CLI, watcher cleanup, and Alpaca contract.
+- Total: **305 passing**, 3 opt-in E2E skipped.
+
+### Added (Tier-3 polish — closing the loop)
+- `EventBus.subscribe(fn, event_types=...)`: per-subscription filter so
+  callbacks only fire for matching event types. Empty set = drop all
+  (useful as a deliberate no-op for testing).
+- `EventBus.replay_from_broker(broker, since=..., event_types=...)`:
+  re-dispatches persisted events to current subscribers in chronological
+  order. Catches up subscribers added mid-run.
+- `BrokerEvent.recorded_at`: timestamp on every delivered event so
+  subscribers can do their own time-based logic without re-querying.
+- New CLI commands: `ledger`, `events` (with `--type` filter),
+  `verify-invariant` (exit 3 on drift), `phase`.
+- `MarketClosedError` now names the current `SessionPhase` so an agent
+  can distinguish "wait 7 minutes for REGULAR" from "wait until tomorrow".
+- MCP server example exposes Tier-3 surfaces:
+  `get_session_phase`, `get_cash_ledger`, `get_recent_events`,
+  `verify_cash_invariant`.
+- New example `examples/06_tier3_observability.py` demonstrates the
+  bus + filter + replay end-to-end.
+
+### Tests
+- 14 new tests covering filter sets, replay, recorded_at on delivered
+  events, phase-aware errors, and CLI smoke tests for all new commands.
+- Total: **246 passing**, 3 opt-in E2E skipped.
+
+### Added (Tier-3 realism)
+
+#### Configurable partial fills
+- New `PartialFillConfig` (`max_per_tick`, `max_pct_per_tick`,
+  `min_fill_qty`, `enabled`). The watcher now slices limit fills per
+  tick instead of all-or-nothing.
+- New `OrderStatus.PARTIALLY_FILLED` is now actually used (was reserved).
+- `Order.filled_avg_price` becomes volume-weighted across slices.
+- `cancel_order()` works on PARTIALLY_FILLED orders too — already-filled
+  qty stays in the position; the rest is dropped.
+- Honest framing: this is a configurable per-tick fill cap, not real
+  bid/ask depth. We have no order book.
+
+#### Session phases
+- New `SessionPhase` enum: `CLOSED`, `PRE_OPEN`, `REGULAR`, `POST_CLOSE`.
+- New `NSECalendar.current_phase(dt=None)` returns the active phase.
+- `is_market_open()` now means "is the REGULAR continuous session
+  active" — kept the same semantics as before so legacy code still works.
+- New `IndiaPaperBroker.current_session_phase()` exposes the phase.
+
+#### Persisted event log
+- New `events` table: append-only, with typed `event_type`, optional
+  `account_id`, `order_id`, JSON `payload`, and `recorded_at`.
+- Events emitted: `order_submitted`, `order_filled`,
+  `order_partially_filled`, `order_cancelled`, `order_expired`,
+  `order_rejected`, `position_opened`, `position_closed`,
+  `corporate_action`, `account_reset`.
+- Events are persisted in the same transaction as the state change,
+  so the log can never disagree with what was committed.
+- New `IndiaPaperBroker.get_events(limit, event_types)` for queries.
+- Honest framing: this is a parallel audit stream, NOT event-sourcing.
+  Account/positions/orders are still authoritative.
+
+#### Observability callback bus
+- New `EventBus` for in-process pub/sub of `BrokerEvent` callbacks.
+  Wire to OpenTelemetry, Prometheus, structured logs, or anything else.
+- Subscribers fire AFTER the SQL transaction commits (so they never
+  see uncommitted state).
+- One bad subscriber doesn't poison the bus — failures are logged
+  per-subscriber and the next one still runs.
+- New `IndiaPaperBroker(event_bus=...)` parameter; `broker.events.subscribe(fn)`.
+- New `stdlib_log_subscriber` convenience for development.
+
+#### Per-symbol slippage
+- `SlippageConfig` gains a `per_symbol_bps: dict[str, float]` field.
+  Use to model illiquid micro-caps with higher slippage than mid-caps.
+- Default `bps` still applies to symbols not in the override map.
+
+### Schema additions
+- `events` table (account-CASCADE; partially scoped — some events have no account_id).
+
+### Tests
+- 42 new tests covering session phases, partial-fill slicing,
+  partial-fill cash invariant, event-log persistence, callback bus
+  isolation, and per-symbol slippage on the broker.
+- Total: **232 passing**, 3 opt-in E2E skipped.
+
 ### Added (Tier-2 realism)
 
 #### Immutable cash ledger

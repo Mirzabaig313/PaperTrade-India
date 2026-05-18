@@ -25,8 +25,8 @@ The simulator deliberately does **not** model:
 
 - Margin, leverage, or short selling
 - Options or F&O
-- Partial fills on limit orders
-- Order-book / auction / pre-open behavior
+- Real order-book / bid-ask depth (partial fills are configurable, not real)
+- Pre-open auction matching algorithm (the phase is recognized, fills are not simulated)
 - Mergers, spin-offs, rights issues (only splits + cash dividends in v0.2)
 - Real-time tick data — yfinance is 15-minute delayed
 
@@ -53,10 +53,12 @@ for the full landscape review.
 - Realistic Indian fees: brokerage, **STT**, exchange charges, **GST**,
   SEBI charges, **stamp duty**, **DP charges**. Configurable per-broker.
 - Thread-safe SQLite persistence with WAL mode and atomic transactions.
-- NSE holiday calendar and trading-hours enforcement.
-- Limit-order support with a background watcher loop.
+- NSE holiday calendar and session-phase awareness (PRE_OPEN /
+  REGULAR / POST_CLOSE / CLOSED).
+- Limit-order support with a background watcher loop and configurable
+  partial fills.
 - Multi-account support — run multiple agents against one DB.
-- **Slippage model** — configurable basis-point impact on market fills.
+- **Slippage model** — configurable basis-point impact, default + per-symbol overrides.
 - **Risk controls** — kill switch, symbol whitelist, per-order and
   per-position notional caps, equity-fraction caps.
 - **Idempotency keys** — replay-safe order submission.
@@ -71,6 +73,10 @@ for the full landscape review.
   on trade date when statutory rates change mid-year.
 - **Stale-price hard-reject** — autonomous-mode flag to refuse fills
   when the price came from the long-lived cache rather than a live feed.
+- **Event log + observability bus** — every domain event persisted to
+  SQLite AND fanned out to in-process subscribers (wire to OTel/Prom/etc).
+- **Configurable partial fills** — per-tick fill cap on limit orders,
+  for stress-testing strategies that assume infinite liquidity.
 - Optional CLI for inspecting state.
 - Optional MCP server example so any LLM agent (Claude Desktop, Cursor,
   custom agents) can use the broker as a tool.
@@ -292,6 +298,68 @@ broker = IndiaPaperBroker(fee_config=schedule)
 # An outage that exhausts yfinance + jugaad raises StalePriceRejected
 # instead of executing on potentially-hours-old data.
 broker = IndiaPaperBroker(enforce_fresh_prices=True)
+```
+
+### Per-symbol slippage
+
+```python
+from papertrade_india import IndiaPaperBroker, SlippageConfig
+
+broker = IndiaPaperBroker(
+    slippage_config=SlippageConfig(
+        bps=5,                                  # default for liquids
+        per_symbol_bps={"PENNYSTOCK": 50.0},    # 0.50% on illiquid
+    ),
+)
+```
+
+### Configurable partial fills
+
+```python
+from papertrade_india import IndiaPaperBroker, PartialFillConfig
+
+broker = IndiaPaperBroker(
+    partial_fill_config=PartialFillConfig(
+        enabled=True,
+        max_per_tick=100,        # absolute cap per watcher tick
+        max_pct_per_tick=0.25,   # or 25% of remaining qty
+        min_fill_qty=1,          # don't fill slivers smaller than this
+    ),
+)
+# A 1000-share limit order now fills across ~10 ticks instead of one.
+# This isn't real bid/ask depth — it's a configurable knob for stress-
+# testing strategies that assume infinite liquidity.
+```
+
+### Session phases
+
+```python
+from papertrade_india import SessionPhase
+
+# Four phases per trading day:
+#   PRE_OPEN     09:00–09:08
+#   REGULAR      09:15–15:30  (the only phase where market orders fill)
+#   POST_CLOSE   15:40–16:00
+#   CLOSED       everything else, weekends, holidays
+phase = broker.current_session_phase()
+if phase == SessionPhase.REGULAR:
+    broker.buy("RELIANCE", 1)
+```
+
+### Event log + observability
+
+```python
+# Persisted event log — recoverable across restarts, queryable in SQL.
+events = broker.get_events(event_types=("order_filled",))
+for e in events:
+    print(e.recorded_at, e.event_type, e.payload)
+
+# In-process callback bus — wire to OpenTelemetry, Prometheus, logs, ...
+def to_metrics(event):
+    if event.event_type == "order_filled":
+        my_counter.inc()
+
+broker.events.subscribe(to_metrics, name="prom-shipper")
 ```
 
 ## How fees are modelled

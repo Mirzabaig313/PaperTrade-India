@@ -219,12 +219,7 @@ class IndiaPaperBroker(BrokerInterface):
     # ── Clock helpers ──────────────────────────────────────────────────
 
     def _now_iso(self) -> str:
-        """ISO timestamp of the broker's current 'now' (clock-aware).
-
-        Replaces direct ``self._now_iso()`` calls so a
-        ``ReplayClock`` can drive the broker deterministically in
-        backtests.
-        """
+        """ISO timestamp of the broker's current 'now' (clock-aware)."""
         return self._clock.now().isoformat()
 
     @property

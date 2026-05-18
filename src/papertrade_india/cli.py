@@ -421,5 +421,50 @@ def create_account(
     )
 
 
+@app.command("migrate")
+def migrate(
+    db: str = typer.Option("data/india_paper.db", help="SQLite DB path"),
+) -> None:
+    """Run any pending schema migrations.
+
+    Operates at the *file* level — there's no account scope on
+    migrations. ``Persistence.__init__`` already runs migrations on
+    every connect, so this command is mainly useful for:
+
+      - Inspecting which migrations would run before opening the broker.
+      - Pre-warming a DB during deployment without instantiating a
+        broker.
+      - Recovering after a partial deploy where migrations weren't
+        applied.
+
+    Exits 0 on success (whether anything ran or not). Exits non-zero
+    only if migrations themselves raise.
+    """
+    import sqlite3
+
+    from .migrations import applied_version, current_version, run_migrations
+
+    raw = sqlite3.connect(db)
+    raw.row_factory = sqlite3.Row
+    try:
+        before = applied_version(raw)
+        target = current_version()
+        if before == target:
+            console.print(
+                f"[green]✓[/green] Database at {db!r} is already at "
+                f"schema version {target}. Nothing to do."
+            )
+            return
+
+        applied = run_migrations(raw)
+        after = applied_version(raw)
+        console.print(
+            f"[green]✓[/green] Migrated {db!r} from v{before} to v{after}.\n"
+            f"  Applied: {applied}"
+        )
+    finally:
+        raw.close()
+
+
 if __name__ == "__main__":  # pragma: no cover
     app()
