@@ -51,3 +51,44 @@ class OrderNoLongerPending(IndiaPaperBrokerError):  # noqa: N818
 
 class AccountNotFoundError(IndiaPaperBrokerError):
     """Strict-open mode: tried to attach to an account that doesn't exist."""
+
+
+class RiskViolation(IndiaPaperBrokerError):  # noqa: N818
+    """A pre-trade risk control rejected the order.
+
+    Examples: order notional exceeds ``max_order_notional``, post-fill
+    position exceeds ``max_position_notional`` or its share-of-equity cap,
+    symbol not in whitelist.
+
+    Naming: keeps ``raise RiskViolation`` readable; the base class
+    already carries the ``Error`` suffix.
+    """
+
+
+class KillSwitchActive(RiskViolation):
+    """The broker's kill switch is engaged.
+
+    Either ``RiskConfig.kill_switch=True`` or the env var
+    ``PAPERTRADE_INDIA_KILL_SWITCH=1``. All orders are rejected until
+    cleared.
+    """
+
+
+class IdempotencyConflict(IndiaPaperBrokerError):  # noqa: N818
+    """An idempotency key was reused with different request parameters.
+
+    Replaying with the same key + same params is fine (returns the
+    stored order). Replaying with the same key + different params is a
+    client bug — almost always a key generated too coarsely for its scope.
+
+    Naming: keeps ``raise IdempotencyConflict`` readable; the base class
+    already carries the ``Error`` suffix.
+    """
+
+
+class SymbolNotFound(IndiaPaperBrokerError):  # noqa: N818
+    """Symbol master is in strict mode and the symbol isn't registered."""
+
+
+class SymbolDelisted(IndiaPaperBrokerError):  # noqa: N818
+    """Symbol exists in the master but has been marked delisted."""

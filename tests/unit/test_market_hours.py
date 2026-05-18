@@ -110,3 +110,50 @@ def test_bundled_calendar_loads_holidays():
     # We don't pin specific dates here — those move year to year — but
     # verify the loader did its job for the bundled file.
     assert cal.is_holiday(date(2026, 1, 26)) is True
+
+
+# ── Bundled holiday data smoke tests ──────────────────────────────────
+
+
+def test_bundled_2026_holiday_dates():
+    """Spot-check several known 2026 weekday holidays load correctly.
+
+    A bad refresh PR that drops, mistypes, or scrambles the JSON should
+    fail this test loudly. Update the list when the bundled file changes.
+    Note: 2026-08-15 (Independence Day) is a Saturday and not in the
+    bundled list — weekends are already non-trading days.
+    """
+    cal = NSECalendar()
+    expected_2026 = [
+        date(2026, 1, 26),   # Republic Day (Mon)
+        date(2026, 5, 1),    # Maharashtra Day (Fri)
+        date(2026, 10, 2),   # Gandhi Jayanti (Fri)
+        date(2026, 12, 25),  # Christmas (Fri)
+    ]
+    for d in expected_2026:
+        assert cal.is_holiday(d), f"missing 2026 holiday: {d}"
+        assert cal.is_trading_day(d) is False
+
+
+def test_bundled_2027_holiday_dates():
+    cal = NSECalendar()
+    # Republic Day 2027 falls on a Tuesday and is a fixed-date holiday;
+    # 2027-05-01 / 2027-08-15 / 2027-10-02 / 2027-12-25 are all weekends
+    # and excluded.
+    expected_2027 = [
+        date(2027, 1, 26),
+    ]
+    for d in expected_2027:
+        assert cal.is_holiday(d), f"missing 2027 holiday: {d}"
+
+
+def test_bundled_data_has_no_weekend_holidays():
+    """Real NSE holiday lists never contain Saturdays/Sundays — those are
+    already non-trading days. If a refresh PR adds one, flag it."""
+    cal = NSECalendar()
+    weekend_holidays = [
+        d for d in cal._holidays if d.weekday() >= 5
+    ]
+    assert weekend_holidays == [], (
+        f"bundled holiday list contains weekends: {weekend_holidays}"
+    )

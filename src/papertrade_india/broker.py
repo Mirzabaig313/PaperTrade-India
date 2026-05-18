@@ -23,6 +23,20 @@ Design notes
   but LIMIT orders are queued — same as a real broker that supports AMO
   (after-market orders). Use ``expire_stale_day_orders()`` to sweep DAY
   limit orders at session close.
+
+Tier-1 adds
+-----------
+- **Slippage**: configurable basis-point slippage on market fills (off
+  by default for backwards compatibility — pass ``SlippageConfig(bps=5)``
+  to enable). See ``slippage.py``.
+- **Risk controls**: pre-trade kill switch, symbol whitelist, per-order
+  notional cap, per-position notional and equity-fraction caps. See
+  ``risk.py``.
+- **Idempotency**: ``buy(...)`` and ``sell(...)`` accept an
+  ``idempotency_key``. Re-submitting the same key with the same params
+  returns the prior order. Different params → ``IdempotencyConflict``.
+- **Symbol master**: optional ``SymbolMaster`` rejects orders for
+  delisted symbols (always) and unknown symbols (in strict mode).
 """
 
 from __future__ import annotations
@@ -32,8 +46,10 @@ import sqlite3
 import uuid
 from datetime import datetime
 
+from . import idempotency as _idempotency
 from .exceptions import (
     AccountNotFoundError,
+    IdempotencyConflict,
     InsufficientFundsError,
     InsufficientSharesError,
     InvalidOrderError,
@@ -54,6 +70,9 @@ from .models import (
 )
 from .persistence import PathLike, Persistence
 from .price_feed import PriceFeed
+from .risk import RiskConfig, RiskContext, RiskEngine
+from .slippage import SlippageConfig, apply_slippage
+from .symbols import SymbolMaster
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +111,9 @@ class IndiaPaperBroker(BrokerInterface):
         calendar: NSECalendar | None = None,
         enforce_market_hours: bool = True,
         strict_open: bool = False,
+        slippage_config: SlippageConfig | None = None,
+        risk_config: RiskConfig | None = None,
+        symbol_master: SymbolMaster | None = None,
     ) -> None:
         """Construct a broker bound to ``account_id`` in ``db_path``.
 
@@ -101,6 +123,20 @@ class IndiaPaperBroker(BrokerInterface):
 
         ``strict_open=True`` is what inspection tools (the CLI) should use
         so they don't silently spawn bogus accounts.
+
+        Tier-1 collaborators
+        --------------------
+        ``slippage_config``: defaults to ``SlippageConfig(bps=0)`` (no
+        slippage), preserving backward compatibility. Pass
+        ``SlippageConfig(bps=5)`` for a realistic 5-bp impact.
+
+        ``risk_config``: defaults to ``RiskConfig()`` with everything
+        disabled (no kill switch, no whitelist, no caps).
+
+        ``symbol_master``: defaults to ``SymbolMaster(strict=False)`` —
+        unknown symbols pass through, delisted symbols are rejected. Pass
+        ``SymbolMaster(strict=True)`` to require every symbol be
+        registered first.
         """
         self.account_id = account_id
         self.default_exchange = exchange
@@ -110,6 +146,11 @@ class IndiaPaperBroker(BrokerInterface):
         self.price_feed = price_feed or PriceFeed()
         self.calendar = calendar or NSECalendar()
         self.fee_engine = IndianFeeEngine(fee_config or FeeConfig())
+
+        # Tier-1 collaborators. All-defaults = legacy behavior.
+        self.slippage_config = slippage_config or SlippageConfig(bps=0.0)
+        self.risk_engine = RiskEngine(risk_config or RiskConfig())
+        self.symbol_master = symbol_master or SymbolMaster(strict=False)
 
         self._ensure_account_exists(initial_capital, strict_open=strict_open)
 
@@ -148,9 +189,11 @@ class IndiaPaperBroker(BrokerInterface):
         order_type: OrderType = OrderType.MARKET,
         limit_price: float | None = None,
         time_in_force: str = "DAY",
+        idempotency_key: str | None = None,
     ) -> Order:
         return self._submit_order(
-            symbol, qty, OrderSide.BUY, order_type, limit_price, time_in_force,
+            symbol, qty, OrderSide.BUY, order_type, limit_price,
+            time_in_force, idempotency_key,
         )
 
     def sell(
@@ -160,9 +203,11 @@ class IndiaPaperBroker(BrokerInterface):
         order_type: OrderType = OrderType.MARKET,
         limit_price: float | None = None,
         time_in_force: str = "DAY",
+        idempotency_key: str | None = None,
     ) -> Order:
         return self._submit_order(
-            symbol, qty, OrderSide.SELL, order_type, limit_price, time_in_force,
+            symbol, qty, OrderSide.SELL, order_type, limit_price,
+            time_in_force, idempotency_key,
         )
 
     # ── Order execution ─────────────────────────────────────────────────
@@ -175,6 +220,7 @@ class IndiaPaperBroker(BrokerInterface):
         order_type: OrderType,
         limit_price: float | None,
         time_in_force: str,
+        idempotency_key: str | None = None,
     ) -> Order:
         if qty <= 0:
             raise InvalidOrderError("qty must be positive")
@@ -184,6 +230,34 @@ class IndiaPaperBroker(BrokerInterface):
             )
         if order_type == OrderType.LIMIT and limit_price is not None and limit_price <= 0:
             raise InvalidOrderError("limit_price must be positive")
+
+        # Idempotency replay check (cheap, runs before any other I/O).
+        if idempotency_key is not None:
+            replay = self._idempotency_replay(
+                key=idempotency_key,
+                side=side,
+                symbol=symbol,
+                qty=qty,
+                order_type=order_type,
+                limit_price=limit_price,
+                time_in_force=time_in_force,
+            )
+            if replay is not None:
+                return replay
+
+        # Symbol master validation: rejects delisted symbols always;
+        # rejects unknown symbols only when SymbolMaster(strict=True).
+        with self.persistence.read() as conn:
+            self.symbol_master.validate(conn, symbol, self.default_exchange)
+
+        # Risk controls (kill switch, whitelist, notional caps).
+        # We run these *before* the price-feed call to fail fast on
+        # rejected symbols / killed brokers.
+        risk_price_for_check = (
+            limit_price if order_type == OrderType.LIMIT and limit_price is not None
+            else self._safe_last_price_for_risk(symbol)
+        )
+        self._risk_check(side, symbol, qty, risk_price_for_check)
 
         market_open = self.calendar.is_market_open()
         # When the market is closed: MARKET orders are rejected, LIMIT
@@ -200,12 +274,158 @@ class IndiaPaperBroker(BrokerInterface):
             )
 
         if order_type == OrderType.MARKET:
-            return self._execute_market_order(symbol, qty, side, time_in_force)
-        # mypy: limit_price is non-None here, guarded above
-        assert limit_price is not None
-        return self._queue_limit_order(
-            symbol, qty, side, limit_price, time_in_force,
+            order = self._execute_market_order(symbol, qty, side, time_in_force)
+        else:
+            assert limit_price is not None  # guarded above
+            order = self._queue_limit_order(
+                symbol, qty, side, limit_price, time_in_force,
+            )
+
+        # Persist the idempotency mapping if a key was provided.
+        if idempotency_key is not None:
+            self._idempotency_store(
+                key=idempotency_key,
+                order_id=order.id,
+                side=side,
+                symbol=symbol,
+                qty=qty,
+                order_type=order_type,
+                limit_price=limit_price,
+                time_in_force=time_in_force,
+            )
+
+        return order
+
+    # ── Idempotency helpers ────────────────────────────────────────────
+
+    def _idempotency_replay(
+        self,
+        key: str,
+        side: OrderSide,
+        symbol: str,
+        qty: float,
+        order_type: OrderType,
+        limit_price: float | None,
+        time_in_force: str,
+    ) -> Order | None:
+        """Look up ``key`` for this account; replay or raise on conflict."""
+        with self.persistence.read() as conn:
+            entry = _idempotency.lookup(conn, self.account_id, key)
+        if entry is None:
+            return None
+
+        rh = _idempotency.hash_request(
+            side=side.value, symbol=symbol, qty=qty,
+            order_type=order_type.value, limit_price=limit_price,
+            time_in_force=time_in_force,
         )
+        if entry.request_hash != rh:
+            raise IdempotencyConflict(
+                f"Idempotency key {key!r} was previously used with "
+                f"different parameters. Use a fresh key for new requests."
+            )
+
+        order = self.get_order(entry.order_id)
+        if order is None:
+            # The original order was deleted (rare — likely a manual
+            # reset). Treat the idempotency record as stale and fall
+            # through to a new submission.
+            logger.warning(
+                "Idempotency key %s pointed at missing order %s; replaying as new",
+                key, entry.order_id,
+            )
+            return None
+        logger.debug("Idempotency replay: key=%s -> order=%s", key, order.id)
+        return order
+
+    def _idempotency_store(
+        self,
+        key: str,
+        order_id: str,
+        side: OrderSide,
+        symbol: str,
+        qty: float,
+        order_type: OrderType,
+        limit_price: float | None,
+        time_in_force: str,
+    ) -> None:
+        rh = _idempotency.hash_request(
+            side=side.value, symbol=symbol, qty=qty,
+            order_type=order_type.value, limit_price=limit_price,
+            time_in_force=time_in_force,
+        )
+        with self.persistence.transaction() as conn:
+            _idempotency.store(
+                conn, self.account_id, key, rh, order_id,
+                datetime.now(IST).isoformat(),
+            )
+
+    def cleanup_idempotency_keys(self, hours: int = 24) -> int:
+        """Delete idempotency rows older than ``hours``. Returns count.
+
+        Run from a daily cron / startup hook to keep the table bounded.
+        Backend convention is 24-48h.
+        """
+        from datetime import timedelta
+        with self.persistence.transaction() as conn:
+            return _idempotency.cleanup_expired(
+                conn, ttl=timedelta(hours=hours),
+            )
+
+    # ── Risk helpers ───────────────────────────────────────────────────
+
+    def _safe_last_price_for_risk(self, symbol: str) -> float:
+        """Best-effort price for risk-cap math. Falls back to 0.0 if the
+        feed is fully unavailable — that just disables the notional caps
+        for this submission, which is the safe fail mode (the actual
+        execution path will still raise PriceUnavailableError before
+        any state changes)."""
+        try:
+            return self.price_feed.get_price(symbol)
+        except Exception as e:  # noqa: BLE001 — risk pre-check is best-effort
+            logger.debug("Risk pre-check: price unavailable for %s: %s", symbol, e)
+            return 0.0
+
+    def _risk_check(
+        self,
+        side: OrderSide,
+        symbol: str,
+        qty: float,
+        price_for_check: float,
+    ) -> None:
+        """Build a RiskContext for the symbol and run the engine."""
+        # Pull existing position + equity from DB in one read.
+        existing_qty = 0.0
+        existing_avg = 0.0
+        with self.persistence.read() as conn:
+            row = conn.execute(
+                "SELECT qty, avg_cost FROM positions "
+                "WHERE account_id = ? AND symbol = ?",
+                (self.account_id, symbol),
+            ).fetchone()
+            if row is not None:
+                existing_qty = row["qty"]
+                existing_avg = row["avg_cost"]
+            equity_row = conn.execute(
+                "SELECT cash FROM account WHERE account_id = ?",
+                (self.account_id,),
+            ).fetchone()
+            cash = equity_row["cash"] if equity_row else 0.0
+        # Equity for risk = cash + sum(position cost-basis). Using
+        # cost-basis (rather than mark-to-market across all positions)
+        # avoids a full price-feed sweep here. Slightly conservative.
+        equity = cash + existing_qty * existing_avg
+
+        ctx = RiskContext(
+            side=side,
+            symbol=symbol,
+            qty=qty,
+            price=price_for_check,
+            existing_qty=existing_qty,
+            existing_avg_cost=existing_avg,
+            equity=equity,
+        )
+        self.risk_engine.check(ctx)
 
     def _execute_market_order(
         self,
@@ -214,8 +434,15 @@ class IndiaPaperBroker(BrokerInterface):
         side: OrderSide,
         time_in_force: str,
     ) -> Order:
-        """Fill immediately at current market price."""
-        price = self.price_feed.get_price(symbol)
+        """Fill immediately at slippage-adjusted market price."""
+        last_price = self.price_feed.get_price(symbol)
+        # Slippage is symmetric: BUY pays above last, SELL receives below.
+        price = apply_slippage(
+            self.slippage_config,
+            side=side,
+            order_type=OrderType.MARKET,
+            last_price=last_price,
+        )
         fees = self.fee_engine.calculate(side, qty, price, self.default_exchange)
         order_id = uuid.uuid4().hex[:12]
         now = datetime.now(IST).isoformat()
@@ -447,9 +674,23 @@ class IndiaPaperBroker(BrokerInterface):
         ``rowcount == 1`` do we apply the cash/position changes.
         ``OrderNoLongerPending`` is raised on a lost race so the watcher
         can skip and move on.
+
+        Slippage on limit fills is opt-in (``SlippageConfig.apply_to_limits``).
+        Default behavior fills at the supplied ``fill_price`` (i.e. the
+        limit price the watcher determined had been crossed).
         """
+        # Optionally re-price using slippage. apply_slippage caps the
+        # result by the limit so we never fill above a buy-limit or
+        # below a sell-limit.
+        adjusted_price = apply_slippage(
+            self.slippage_config,
+            side=order.side,
+            order_type=OrderType.LIMIT,
+            last_price=fill_price,
+            limit_price=order.limit_price,
+        )
         fees = self.fee_engine.calculate(
-            order.side, order.qty, fill_price, order.exchange,
+            order.side, order.qty, adjusted_price, order.exchange,
         )
         now = datetime.now(IST).isoformat()
 
@@ -465,7 +706,7 @@ class IndiaPaperBroker(BrokerInterface):
                 (
                     OrderStatus.FILLED.value,
                     order.qty,
-                    fill_price,
+                    adjusted_price,
                     fees.total,
                     0.0,  # placeholder; rewritten below for sells
                     now,
@@ -481,12 +722,14 @@ class IndiaPaperBroker(BrokerInterface):
 
             if order.side == OrderSide.BUY:
                 self._apply_buy(
-                    conn, order.symbol, order.qty, fill_price, fees.total, now,
+                    conn, order.symbol, order.qty, adjusted_price,
+                    fees.total, now,
                 )
                 realized_pl = 0.0
             else:
                 realized_pl = self._apply_sell(
-                    conn, order.symbol, order.qty, fill_price, fees.total, now,
+                    conn, order.symbol, order.qty, adjusted_price,
+                    fees.total, now,
                 )
 
             # Re-stamp realized_pl now that we know it (placeholder above
@@ -504,7 +747,7 @@ class IndiaPaperBroker(BrokerInterface):
                 symbol=order.symbol,
                 side=order.side,
                 qty=order.qty,
-                price=fill_price,
+                price=adjusted_price,
                 fees=fees.total,
                 realized_pl=realized_pl,
                 executed_at=now,
@@ -513,7 +756,7 @@ class IndiaPaperBroker(BrokerInterface):
         logger.info(
             "LIMIT FILL %s %s %s @ ₹%.2f (limit was ₹%.2f)",
             order.side.value.upper(), order.qty, order.symbol,
-            fill_price, order.limit_price,
+            adjusted_price, order.limit_price,
         )
 
     # ── Read API ────────────────────────────────────────────────────────

@@ -24,13 +24,18 @@ Public API
 from .broker import IndiaPaperBroker
 from .exceptions import (
     AccountNotFoundError,
+    IdempotencyConflict,
     IndiaPaperBrokerError,
     InsufficientFundsError,
     InsufficientSharesError,
     InvalidOrderError,
+    KillSwitchActive,
     MarketClosedError,
     OrderNoLongerPending,
     PriceUnavailableError,
+    RiskViolation,
+    SymbolDelisted,
+    SymbolNotFound,
 )
 from .fees import FeeBreakdown, FeeConfig, IndianFeeEngine
 from .interface import BrokerInterface
@@ -53,6 +58,9 @@ from .price_feed import (
     PriceProvider,
     YFinanceProvider,
 )
+from .risk import RiskConfig, RiskContext, RiskEngine
+from .slippage import SlippageConfig, apply_slippage
+from .symbols import SymbolEntry, SymbolMaster
 
 __all__ = [
     # Core
@@ -83,6 +91,14 @@ __all__ = [
     "YFinanceProvider",
     # Background workers
     "LimitOrderWatcher",
+    # Tier-1: slippage / risk / symbols
+    "SlippageConfig",
+    "apply_slippage",
+    "RiskConfig",
+    "RiskContext",
+    "RiskEngine",
+    "SymbolMaster",
+    "SymbolEntry",
     # Exceptions
     "IndiaPaperBrokerError",
     "InsufficientFundsError",
@@ -92,6 +108,11 @@ __all__ = [
     "OrderNoLongerPending",
     "AccountNotFoundError",
     "PriceUnavailableError",
+    "RiskViolation",
+    "KillSwitchActive",
+    "IdempotencyConflict",
+    "SymbolNotFound",
+    "SymbolDelisted",
 ]
 
 __version__ = "0.1.0.dev0"

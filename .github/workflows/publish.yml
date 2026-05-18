@@ -1,0 +1,42 @@
+name: publish
+
+on:
+  push:
+    tags:
+      - "v*.*.*"        # e.g. v0.1.0, v0.2.0-rc.1
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/papertrade-india
+    permissions:
+      id-token: write   # PyPI Trusted Publishing (OIDC, no API token)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build + verification deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build sdist + wheel
+        run: python -m build
+
+      - name: Twine check
+        run: twine check dist/*
+
+      - name: Publish to PyPI
+        # Trusted Publishing — no API token needed once the project is
+        # configured on PyPI to trust this workflow.
+        uses: pypa/gh-action-pypi-publish@release/v1

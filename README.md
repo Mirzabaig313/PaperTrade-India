@@ -9,6 +9,30 @@ trading service so you can swap markets without changing your agent code.
 > **Status:** alpha — pre-1.0. The public API is stable enough to use, but
 > minor releases may include breaking changes until 1.0.
 
+## Goals
+
+- Realistic NSE/BSE paper trading for **cash equity, delivery, long-only**.
+- Drop-in replacement for an Alpaca-style trading service.
+- Configurable enough to model your specific broker's fee schedule.
+- Auditable: realized P&L matches a contract note within ~₹0.05 across
+  the supported scenarios.
+- Safe enough to plug behind an autonomous AI agent (idempotency, kill
+  switch, position caps, symbol whitelist, rejection of delisted symbols).
+
+## Non-goals
+
+The simulator deliberately does **not** model:
+
+- Margin, leverage, or short selling
+- Options or F&O
+- Partial fills on limit orders
+- Order-book / auction / pre-open behavior
+- Corporate actions (splits, dividends, bonuses) — manual `reset()` for now
+- Real-time tick data — yfinance is 15-minute delayed
+
+These are documented limitations, not bugs. Add them only when a real use
+case forces it.
+
 ## Why
 
 | Platform | Paper trading? | API access? |
@@ -32,6 +56,13 @@ for the full landscape review.
 - NSE holiday calendar and trading-hours enforcement.
 - Limit-order support with a background watcher loop.
 - Multi-account support — run multiple agents against one DB.
+- **Slippage model** — configurable basis-point impact on market fills.
+- **Risk controls** — kill switch, symbol whitelist, per-order and
+  per-position notional caps, equity-fraction caps.
+- **Idempotency keys** — replay-safe order submission.
+- **Broker presets** — named `FeeConfig` for Zerodha, Upstox, Groww,
+  Angel One, ICICIdirect (delivery + intraday variants).
+- **Symbol master** — track tradeable symbols, reject delisted symbols.
 - Optional CLI for inspecting state.
 - Optional MCP server example so any LLM agent (Claude Desktop, Cursor,
   custom agents) can use the broker as a tool.
@@ -129,6 +160,77 @@ broker = IndiaPaperBroker(
     ),
     enforce_market_hours=True,  # Reject MARKET orders outside NSE hours
 )
+```
+
+### Slippage
+
+```python
+from papertrade_india import IndiaPaperBroker, SlippageConfig
+
+broker = IndiaPaperBroker(
+    slippage_config=SlippageConfig(bps=5),  # 0.05% slippage on market fills
+)
+# BUY pays 5 bps above last; SELL receives 5 bps below.
+# Default is 0 bps (legacy behavior). Tune to match your strategy's fills.
+```
+
+### Risk controls
+
+```python
+from papertrade_india import IndiaPaperBroker, RiskConfig
+
+broker = IndiaPaperBroker(
+    risk_config=RiskConfig(
+        kill_switch=False,                       # Or PAPERTRADE_INDIA_KILL_SWITCH=1
+        symbol_whitelist=frozenset({"RELIANCE", "INFY"}),
+        max_order_notional=100_000.0,            # ₹1L per order
+        max_position_notional=500_000.0,         # ₹5L per position
+        max_position_pct_of_equity=0.20,         # 20% of equity per position
+    ),
+)
+```
+
+### Idempotency
+
+```python
+# Re-submitting the same key with the same params returns the original order
+# (no duplicate fill). Different params under the same key raise
+# IdempotencyConflict.
+order1 = broker.buy("RELIANCE", 1, idempotency_key="trade-2026-05-18-001")
+order2 = broker.buy("RELIANCE", 1, idempotency_key="trade-2026-05-18-001")
+assert order1.id == order2.id  # same order, no double-buy
+```
+
+### Broker presets
+
+```python
+from papertrade_india import IndiaPaperBroker
+from papertrade_india.presets import ZERODHA_INTRADAY, UPSTOX_DELIVERY
+
+broker = IndiaPaperBroker(fee_config=ZERODHA_INTRADAY)
+# Available: zerodha-delivery, zerodha-intraday, upstox-delivery,
+# upstox-intraday, groww-delivery, angel-one-delivery,
+# angel-one-intraday, icicidirect-delivery
+```
+
+### Symbol master
+
+```python
+from pathlib import Path
+from papertrade_india import IndiaPaperBroker, SymbolMaster, Exchange
+
+broker = IndiaPaperBroker(
+    symbol_master=SymbolMaster(strict=True),  # require registration
+)
+
+# Load the bundled NSE-30 sample, or your own CSV
+sample = Path(__file__).parent / "src/papertrade_india/data/nse_universe_sample.csv"
+with broker.persistence.transaction() as conn:
+    broker.symbol_master.load_csv(conn, sample, Exchange.NSE)
+
+# Mark a symbol delisted (rejected even in lenient mode)
+with broker.persistence.transaction() as conn:
+    broker.symbol_master.delist(conn, "OLDCO", Exchange.NSE)
 ```
 
 ## How fees are modelled

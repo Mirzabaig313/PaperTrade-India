@@ -23,6 +23,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from . import idempotency as _idempotency
+from . import symbols as _symbols
+
 PathLike = str | Path
 
 
@@ -109,6 +112,12 @@ CREATE INDEX IF NOT EXISTS idx_trades_account_executed
 """
 
 
+# Tier-1 add-on schemas. Each lives in its own module for cohesion (the
+# idempotency / symbol-master logic stays alongside its schema), and we
+# concatenate them here so a fresh DB picks them up on first connect.
+EXTENSION_SCHEMAS = (_idempotency.SCHEMA, _symbols.SCHEMA)
+
+
 class Persistence:
     """Thread-safe SQLite wrapper.
 
@@ -123,9 +132,11 @@ class Persistence:
         self.db_path = str(db_path)
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
-        # Initialize schema on first connection.
+        # Initialize core + extension schemas on first connection.
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            for ext in EXTENSION_SCHEMAS:
+                conn.executescript(ext)
 
     def _connect(self) -> sqlite3.Connection:
         """Return the thread-local connection, creating it lazily."""
