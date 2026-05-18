@@ -36,6 +36,20 @@ class PriceUnavailableError(IndiaPaperBrokerError):
     """All price providers failed and no cached price is available."""
 
 
+class StalePriceRejected(IndiaPaperBrokerError):  # noqa: N818
+    """``enforce_fresh_prices=True`` mode rejected a fill because the
+    underlying price came from the long-lived cached fallback rather
+    than a live provider.
+
+    Use this mode for autonomous-agent deployments where you'd rather
+    halt than execute against a price that may be stale by minutes or
+    hours.
+
+    Naming: keeps ``raise StalePriceRejected`` readable; the base class
+    already carries the ``Error`` suffix.
+    """
+
+
 class OrderNoLongerPending(IndiaPaperBrokerError):  # noqa: N818
     """Internal: a limit order moved out of PENDING between selection
     and fill (e.g. user cancelled while the watcher was working).

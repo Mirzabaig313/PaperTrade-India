@@ -23,7 +23,8 @@ Pass a custom ``FeeConfig`` to model a different broker's schedule.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import date  # noqa: F401 — used in FeeSchedule type hints
 from decimal import ROUND_HALF_UP, Decimal
 
 from .models import Exchange, OrderSide
@@ -82,6 +83,48 @@ class FeeConfig:
     # it per sell order in the simulator (very slightly conservative if a
     # user sells the same symbol multiple times in one day).
     dp_charge_per_sell: float = 13.5
+
+
+@dataclass(frozen=True)
+class FeeSchedule:
+    """Date-versioned fee schedule.
+
+    Maps an effective-from date (inclusive) to a ``FeeConfig``. The
+    correct config is picked by the order's *trade date* — useful when
+    statutory rates change mid-year (the government regularly tweaks
+    STT, GST, stamp duty in the union budget).
+
+    Usage::
+
+        schedule = FeeSchedule(
+            default=FeeConfig(),                      # pre-history
+            effective_from={
+                date(2025, 4, 1): FeeConfig(stt_pct_buy=0.001),
+                date(2026, 4, 1): FeeConfig(stt_pct_buy=0.00125),  # hike
+            },
+        )
+        cfg = schedule.config_on(date(2025, 9, 1))    # → 2025 config
+        cfg = schedule.config_on(date(2026, 5, 1))    # → 2026 config
+
+    A bare ``FeeConfig`` keeps working — the broker wraps it in a
+    ``FeeSchedule(default=cfg)``.
+    """
+
+    default: FeeConfig
+    effective_from: dict[date, FeeConfig] = field(default_factory=dict)
+
+    def config_on(self, when: date) -> FeeConfig:
+        """Pick the fee config in effect on ``when``.
+
+        Walks effective-from dates in descending order and returns the
+        first one ``<= when``. Falls back to ``default``.
+        """
+        if not self.effective_from:
+            return self.default
+        for eff_date in sorted(self.effective_from, reverse=True):
+            if eff_date <= when:
+                return self.effective_from[eff_date]
+        return self.default
 
 
 def _round_paise(x: float) -> float:

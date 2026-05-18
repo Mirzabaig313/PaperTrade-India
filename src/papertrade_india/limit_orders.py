@@ -24,7 +24,7 @@ import logging
 import threading
 from typing import TYPE_CHECKING
 
-from .exceptions import OrderNoLongerPending
+from .exceptions import OrderNoLongerPending, StalePriceRejected
 from .models import OrderSide, OrderStatus, OrderType
 
 if TYPE_CHECKING:  # avoid runtime circular import
@@ -89,9 +89,13 @@ class LimitOrderWatcher(threading.Thread):
         # Group by symbol to minimize price fetches.
         symbols = {o.symbol for o in pending}
         prices = {}
+        stale_symbols: set[str] = set()
         for s in symbols:
             try:
-                prices[s] = self.broker.price_feed.get_price(s)
+                quote = self.broker.price_feed.get_quote(s)
+                prices[s] = quote.price
+                if quote.is_stale:
+                    stale_symbols.add(s)
             except Exception as e:  # noqa: BLE001
                 logger.warning("Price unavailable for %s: %s", s, e)
                 prices[s] = None
@@ -100,6 +104,20 @@ class LimitOrderWatcher(threading.Thread):
         for order in pending:
             price = prices.get(order.symbol)
             if price is None or order.limit_price is None:
+                continue
+            # Pre-check: if enforce_fresh_prices is on and this symbol's
+            # quote is stale, skip it now rather than letting the broker
+            # raise StalePriceRejected from inside _execute_limit_fill.
+            # Reduces log noise (the warning is emitted once per stale
+            # symbol per tick).
+            if (
+                self.broker.enforce_fresh_prices
+                and order.symbol in stale_symbols
+            ):
+                logger.debug(
+                    "Skip %s: price is stale and enforce_fresh_prices=True",
+                    order.id,
+                )
                 continue
 
             should_fill = (
@@ -116,6 +134,13 @@ class LimitOrderWatcher(threading.Thread):
                     logger.debug(
                         "Order %s cleared between selection and fill; skip",
                         order.id,
+                    )
+                except StalePriceRejected:
+                    # The price went stale between our quote and the
+                    # broker's re-quote inside _execute_limit_fill.
+                    # Order stays PENDING for the next tick.
+                    logger.debug(
+                        "Order %s skipped: stale-price rejection", order.id,
                     )
                 except Exception as e:  # noqa: BLE001
                     logger.exception(

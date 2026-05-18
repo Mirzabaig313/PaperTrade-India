@@ -13,18 +13,56 @@ Fail behavior: if every provider returns ``None`` AND the persistent cache
 is expired, ``PriceFeed.get_price`` raises ``PriceUnavailableError``. The
 broker treats this as fatal for new orders; for valuation of existing
 positions it falls back to ``avg_cost`` (i.e. shows zero unrealized P&L).
+
+Quote source tracking (Tier 2)
+------------------------------
+``PriceFeed.get_quote(symbol)`` returns a ``Quote`` (price + source +
+timestamp). ``Quote.is_stale`` is True when the price came from the
+long-lived cache rather than a live provider — the broker uses this to
+implement ``enforce_fresh_prices=True`` mode for autonomous deployments.
+
+``PriceFeed.get_price()`` still returns a bare float for backwards
+compatibility with anything that doesn't care about staleness.
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
 from .exceptions import PriceUnavailableError
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Quote:
+    """A price observation with provenance.
+
+    Attributes
+    ----------
+    price:
+        The numeric price.
+    source:
+        Identifier of the provider that produced it (e.g. ``"yfinance"``,
+        ``"jugaad-data"``, ``"short_cache"``, ``"long_cache"``).
+    fetched_at:
+        Wall-clock time when this price was first fetched from a live
+        provider. For cached returns, this is the original fetch time
+        (not the time of the cache hit).
+    is_stale:
+        True when the value came from the long-lived cache fallback
+        (i.e. all live providers failed). The short-lived cache is
+        considered fresh.
+    """
+
+    price: float
+    source: str
+    fetched_at: datetime
+    is_stale: bool
 
 
 class PriceProvider(Protocol):
@@ -123,6 +161,20 @@ class CachedLastKnownProvider:
             return None
         return price
 
+    def get_entry(self, symbol: str) -> tuple[float, datetime] | None:
+        """Return the cached (price, fetched_at) tuple, or ``None``.
+
+        Used by ``PriceFeed.get_quote`` to surface the original fetch
+        timestamp on a stale-cache fallback.
+        """
+        entry = self._cache.get(symbol)
+        if entry is None:
+            return None
+        price, fetched_at = entry
+        if (datetime.now() - fetched_at).total_seconds() > self.ttl:
+            return None
+        return price, fetched_at
+
 
 # ── Coordinator ───────────────────────────────────────────────────────
 
@@ -153,12 +205,32 @@ class PriceFeed:
         self._short_cache_ttl = short_cache_ttl_seconds
 
     def get_price(self, symbol: str) -> float:
-        # Short cache check
+        """Backwards-compatible bare-float accessor.
+
+        Internally calls ``get_quote`` and discards the staleness info.
+        New code that cares about source/staleness should use
+        ``get_quote`` directly.
+        """
+        return self.get_quote(symbol).price
+
+    def get_quote(self, symbol: str) -> Quote:
+        """Fetch a price with provenance.
+
+        Tries the short cache, then each live provider in order, then
+        the long-lived cache. Always returns a ``Quote`` or raises
+        ``PriceUnavailableError`` — never silently degrades.
+        """
+        # Short cache check — counts as fresh, source = "short_cache".
         entry = self._short_cache.get(symbol)
         if entry is not None:
             price, t = entry
             if (time.time() - t) < self._short_cache_ttl:
-                return price
+                return Quote(
+                    price=price,
+                    source="short_cache",
+                    fetched_at=datetime.fromtimestamp(t),
+                    is_stale=False,
+                )
 
         for provider in self.providers:
             try:
@@ -169,18 +241,31 @@ class PriceFeed:
                 )
                 price = None
             if price is not None:
+                now = datetime.now()
                 self.cache.update(symbol, price)
                 self._short_cache[symbol] = (price, time.time())
-                return price
+                return Quote(
+                    price=price,
+                    source=type(provider).__name__,
+                    fetched_at=now,
+                    is_stale=False,
+                )
 
-        # Last resort: long-lived cache
-        cached = self.cache.get_price(symbol)
+        # Last resort: long-lived cache. This is the staleness path.
+        cached = self.cache.get_entry(symbol)
         if cached is not None:
+            price, fetched_at = cached
             logger.warning(
-                "Using cached price for %s — all live providers failed",
-                symbol,
+                "Using cached price for %s — all live providers failed "
+                "(cache age: %s)",
+                symbol, datetime.now() - fetched_at,
             )
-            return cached
+            return Quote(
+                price=price,
+                source="long_cache",
+                fetched_at=fetched_at,
+                is_stale=True,
+            )
 
         raise PriceUnavailableError(
             f"Cannot fetch price for {symbol} — "

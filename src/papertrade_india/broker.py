@@ -46,7 +46,9 @@ import sqlite3
 import uuid
 from datetime import datetime
 
+from . import corporate_actions as _corporate_actions
 from . import idempotency as _idempotency
+from . import ledger as _ledger
 from .exceptions import (
     AccountNotFoundError,
     IdempotencyConflict,
@@ -55,8 +57,9 @@ from .exceptions import (
     InvalidOrderError,
     MarketClosedError,
     OrderNoLongerPending,
+    StalePriceRejected,
 )
-from .fees import FeeConfig, IndianFeeEngine
+from .fees import FeeConfig, FeeSchedule, IndianFeeEngine
 from .interface import BrokerInterface
 from .market_hours import IST, NSECalendar
 from .models import (
@@ -69,7 +72,7 @@ from .models import (
     Position,
 )
 from .persistence import PathLike, Persistence
-from .price_feed import PriceFeed
+from .price_feed import PriceFeed, Quote
 from .risk import RiskConfig, RiskContext, RiskEngine
 from .slippage import SlippageConfig, apply_slippage
 from .symbols import SymbolMaster
@@ -106,7 +109,7 @@ class IndiaPaperBroker(BrokerInterface):
         db_path: PathLike = "data/india_paper.db",
         account_id: str = "default",
         exchange: Exchange = Exchange.NSE,
-        fee_config: FeeConfig | None = None,
+        fee_config: FeeConfig | FeeSchedule | None = None,
         price_feed: PriceFeed | None = None,
         calendar: NSECalendar | None = None,
         enforce_market_hours: bool = True,
@@ -114,6 +117,7 @@ class IndiaPaperBroker(BrokerInterface):
         slippage_config: SlippageConfig | None = None,
         risk_config: RiskConfig | None = None,
         symbol_master: SymbolMaster | None = None,
+        enforce_fresh_prices: bool = False,
     ) -> None:
         """Construct a broker bound to ``account_id`` in ``db_path``.
 
@@ -137,15 +141,37 @@ class IndiaPaperBroker(BrokerInterface):
         unknown symbols pass through, delisted symbols are rejected. Pass
         ``SymbolMaster(strict=True)`` to require every symbol be
         registered first.
+
+        Tier-2 collaborators
+        --------------------
+        ``fee_config``: accepts either a bare ``FeeConfig`` (legacy) or
+        a ``FeeSchedule`` for date-versioned fee schedules. Bare configs
+        are wrapped automatically.
+
+        ``enforce_fresh_prices``: when True, reject order fills whose
+        underlying price came from the long-lived stale-price cache.
+        Use for autonomous-agent deployments where halting is safer
+        than executing on a stale price.
         """
         self.account_id = account_id
         self.default_exchange = exchange
         self.enforce_market_hours = enforce_market_hours
+        self.enforce_fresh_prices = enforce_fresh_prices
 
         self.persistence = Persistence(db_path)
         self.price_feed = price_feed or PriceFeed()
         self.calendar = calendar or NSECalendar()
-        self.fee_engine = IndianFeeEngine(fee_config or FeeConfig())
+
+        # Wrap a bare FeeConfig in a single-entry FeeSchedule so the
+        # rest of the broker can call self.fee_schedule.config_on(date).
+        schedule: FeeSchedule
+        if fee_config is None:
+            schedule = FeeSchedule(default=FeeConfig())
+        elif isinstance(fee_config, FeeSchedule):
+            schedule = fee_config
+        else:
+            schedule = FeeSchedule(default=fee_config)
+        self.fee_schedule = schedule
 
         # Tier-1 collaborators. All-defaults = legacy behavior.
         self.slippage_config = slippage_config or SlippageConfig(bps=0.0)
@@ -153,6 +179,23 @@ class IndiaPaperBroker(BrokerInterface):
         self.symbol_master = symbol_master or SymbolMaster(strict=False)
 
         self._ensure_account_exists(initial_capital, strict_open=strict_open)
+
+    def _fee_engine_for(self, when_iso: str) -> IndianFeeEngine:
+        """Build the fee engine for an order's trade date."""
+        d = datetime.fromisoformat(when_iso).date()
+        return IndianFeeEngine(self.fee_schedule.config_on(d))
+
+    @property
+    def fee_engine(self) -> IndianFeeEngine:
+        """Backwards-compat shim: the engine for *today* (IST).
+
+        Existing tests and external callers that read ``broker.fee_engine``
+        keep working. New code should prefer ``_fee_engine_for(when)``
+        so date-versioned schedules apply.
+        """
+        return IndianFeeEngine(
+            self.fee_schedule.config_on(datetime.now(IST).date())
+        )
 
     # ── Account lifecycle ───────────────────────────────────────────────
 
@@ -170,14 +213,21 @@ class IndiaPaperBroker(BrokerInterface):
                         f"Account {self.account_id!r} does not exist in "
                         f"{self.persistence.db_path}"
                     )
+                now = datetime.now(IST).isoformat()
                 conn.execute(
                     "INSERT INTO account (account_id, cash, created_at) "
                     "VALUES (?, ?, ?)",
-                    (
-                        self.account_id,
-                        float(initial_capital),
-                        datetime.now(IST).isoformat(),
-                    ),
+                    (self.account_id, float(initial_capital), now),
+                )
+                # Seed the ledger with the opening deposit so
+                # sum(movements) == cash from day one.
+                _ledger.record(
+                    conn,
+                    account_id=self.account_id,
+                    amount=float(initial_capital),
+                    reason="initial_capital",
+                    recorded_at_iso=now,
+                    notes="Account opened",
                 )
 
     # ── Public API: order placement ────────────────────────────────────
@@ -374,6 +424,21 @@ class IndiaPaperBroker(BrokerInterface):
 
     # ── Risk helpers ───────────────────────────────────────────────────
 
+    def _get_fill_quote(self, symbol: str) -> Quote:
+        """Fetch a quote for a fill and apply ``enforce_fresh_prices``.
+
+        The fill path runs through this single helper so the staleness
+        rule is consistent across market and limit orders.
+        """
+        quote = self.price_feed.get_quote(symbol)
+        if self.enforce_fresh_prices and quote.is_stale:
+            raise StalePriceRejected(
+                f"Refusing to fill {symbol} at stale cached price "
+                f"₹{quote.price:.2f} (fetched {quote.fetched_at.isoformat()}). "
+                f"Disable enforce_fresh_prices=False to allow stale fills."
+            )
+        return quote
+
     def _safe_last_price_for_risk(self, symbol: str) -> float:
         """Best-effort price for risk-cap math. Falls back to 0.0 if the
         feed is fully unavailable — that just disables the notional caps
@@ -435,7 +500,8 @@ class IndiaPaperBroker(BrokerInterface):
         time_in_force: str,
     ) -> Order:
         """Fill immediately at slippage-adjusted market price."""
-        last_price = self.price_feed.get_price(symbol)
+        quote = self._get_fill_quote(symbol)
+        last_price = quote.price
         # Slippage is symmetric: BUY pays above last, SELL receives below.
         price = apply_slippage(
             self.slippage_config,
@@ -443,20 +509,26 @@ class IndiaPaperBroker(BrokerInterface):
             order_type=OrderType.MARKET,
             last_price=last_price,
         )
-        fees = self.fee_engine.calculate(side, qty, price, self.default_exchange)
         order_id = uuid.uuid4().hex[:12]
         now = datetime.now(IST).isoformat()
+        # Date-versioned fee schedule: use the trade-date config.
+        fee_engine = self._fee_engine_for(now)
+        fees = fee_engine.calculate(side, qty, price, self.default_exchange)
 
         # The transaction context manager rolls back on exception, so any
         # InsufficientFundsError / InsufficientSharesError raised from
         # _apply_* propagates out cleanly. No try/except needed here.
         with self.persistence.transaction() as conn:
             if side == OrderSide.BUY:
-                self._apply_buy(conn, symbol, qty, price, fees.total, now)
+                self._apply_buy(
+                    conn, symbol, qty, price, fees.total, now,
+                    order_id=order_id,
+                )
                 realized_pl = 0.0
             else:
                 realized_pl = self._apply_sell(
                     conn, symbol, qty, price, fees.total, now,
+                    order_id=order_id,
                 )
 
             self._record_order(
@@ -514,6 +586,7 @@ class IndiaPaperBroker(BrokerInterface):
         price: float,
         fees: float,
         now: str,
+        order_id: str | None = None,
     ) -> None:
         """Apply a buy: deduct cash, update or create the position.
 
@@ -523,8 +596,12 @@ class IndiaPaperBroker(BrokerInterface):
         position, and a later sell's realized P&L line — computed as
         ``(price - avg_cost) * qty - sell_fees`` — naturally accounts for
         *both* sides of fees over the round-trip.
+
+        Ledger: writes two cash-movement rows (buy_principal, buy_fees)
+        so ``sum(movements) == account.cash`` stays an exact invariant.
         """
-        cost = qty * price + fees
+        principal = qty * price
+        cost = principal + fees
         cash = conn.execute(
             "SELECT cash FROM account WHERE account_id = ?",
             (self.account_id,),
@@ -539,6 +616,28 @@ class IndiaPaperBroker(BrokerInterface):
             "UPDATE account SET cash = cash - ? WHERE account_id = ?",
             (cost, self.account_id),
         )
+
+        # Ledger: principal first, then fees. Two rows so analytics can
+        # separate "what I paid for shares" from "what I paid the broker".
+        _ledger.record(
+            conn,
+            account_id=self.account_id,
+            amount=-principal,
+            reason="buy_principal",
+            recorded_at_iso=now,
+            order_id=order_id,
+            symbol=symbol,
+        )
+        if fees != 0:
+            _ledger.record(
+                conn,
+                account_id=self.account_id,
+                amount=-fees,
+                reason="buy_fees",
+                recorded_at_iso=now,
+                order_id=order_id,
+                symbol=symbol,
+            )
 
         existing = conn.execute(
             "SELECT qty, avg_cost FROM positions "
@@ -578,12 +677,17 @@ class IndiaPaperBroker(BrokerInterface):
         price: float,
         fees: float,
         now: str,
+        order_id: str | None = None,
     ) -> float:
         """Apply a sell: credit cash, update or close position, return realized P&L.
 
         Realized P&L = ``(price - avg_cost) * qty - sell_fees``. Because
         ``avg_cost`` already includes prorated buy-side fees, this is the
         true round-trip P&L net of all fees.
+
+        Ledger: writes two cash-movement rows (sell_principal positive,
+        sell_fees negative) so ``sum(movements) == account.cash`` stays
+        exact across round-trips.
         """
         existing = conn.execute(
             "SELECT qty, avg_cost FROM positions "
@@ -599,7 +703,8 @@ class IndiaPaperBroker(BrokerInterface):
 
         old_qty = existing["qty"]
         avg_cost = existing["avg_cost"]
-        proceeds = qty * price - fees
+        principal = qty * price
+        proceeds = principal - fees
         realized_pl = (price - avg_cost) * qty - fees
 
         conn.execute(
@@ -608,6 +713,27 @@ class IndiaPaperBroker(BrokerInterface):
             "WHERE account_id = ?",
             (proceeds, realized_pl, self.account_id),
         )
+
+        # Ledger: principal credit + fees debit.
+        _ledger.record(
+            conn,
+            account_id=self.account_id,
+            amount=principal,
+            reason="sell_principal",
+            recorded_at_iso=now,
+            order_id=order_id,
+            symbol=symbol,
+        )
+        if fees != 0:
+            _ledger.record(
+                conn,
+                account_id=self.account_id,
+                amount=-fees,
+                reason="sell_fees",
+                recorded_at_iso=now,
+                order_id=order_id,
+                symbol=symbol,
+            )
 
         new_qty = old_qty - qty
         if new_qty <= _QTY_EPSILON:
@@ -678,6 +804,11 @@ class IndiaPaperBroker(BrokerInterface):
         Slippage on limit fills is opt-in (``SlippageConfig.apply_to_limits``).
         Default behavior fills at the supplied ``fill_price`` (i.e. the
         limit price the watcher determined had been crossed).
+
+        Stale-price reject: when ``enforce_fresh_prices=True`` and the
+        watcher's price came from the long-lived stale cache, this raises
+        ``StalePriceRejected`` and the order stays PENDING for the next
+        tick. The watcher passes its own price; we don't re-quote here.
         """
         # Optionally re-price using slippage. apply_slippage caps the
         # result by the limit so we never fill above a buy-limit or
@@ -689,10 +820,11 @@ class IndiaPaperBroker(BrokerInterface):
             last_price=fill_price,
             limit_price=order.limit_price,
         )
-        fees = self.fee_engine.calculate(
+        now = datetime.now(IST).isoformat()
+        fee_engine = self._fee_engine_for(now)
+        fees = fee_engine.calculate(
             order.side, order.qty, adjusted_price, order.exchange,
         )
-        now = datetime.now(IST).isoformat()
 
         with self.persistence.transaction() as conn:
             # Claim the order first. If another thread cancelled it
@@ -723,13 +855,13 @@ class IndiaPaperBroker(BrokerInterface):
             if order.side == OrderSide.BUY:
                 self._apply_buy(
                     conn, order.symbol, order.qty, adjusted_price,
-                    fees.total, now,
+                    fees.total, now, order_id=order.id,
                 )
                 realized_pl = 0.0
             else:
                 realized_pl = self._apply_sell(
                     conn, order.symbol, order.qty, adjusted_price,
-                    fees.total, now,
+                    fees.total, now, order_id=order.id,
                 )
 
             # Re-stamp realized_pl now that we know it (placeholder above
@@ -975,6 +1107,9 @@ class IndiaPaperBroker(BrokerInterface):
 
         Trades have ON DELETE CASCADE on both ``order_id`` and
         ``account_id``, so deleting orders sweeps trades automatically.
+        Cash movements are wiped (account-scoped CASCADE), then a fresh
+        ``initial_capital`` row is inserted to keep the ledger
+        invariant: ``sum(movements) == account.cash``.
         """
         with self.persistence.transaction() as conn:
             conn.execute(
@@ -991,17 +1126,45 @@ class IndiaPaperBroker(BrokerInterface):
                 "DELETE FROM positions WHERE account_id = ?",
                 (self.account_id,),
             )
+            conn.execute(
+                "DELETE FROM cash_movements WHERE account_id = ?",
+                (self.account_id,),
+            )
+
+            now = datetime.now(IST).isoformat()
             if initial_capital is not None:
                 conn.execute(
                     "UPDATE account SET cash = ?, realized_pl_total = 0 "
                     "WHERE account_id = ?",
                     (initial_capital, self.account_id),
                 )
+                _ledger.record(
+                    conn,
+                    account_id=self.account_id,
+                    amount=float(initial_capital),
+                    reason="initial_capital",
+                    recorded_at_iso=now,
+                    notes="Account reset",
+                )
             else:
+                # Reset realized P&L but keep cash. Re-seed ledger so
+                # sum(movements) == cash.
+                cash_row = conn.execute(
+                    "SELECT cash FROM account WHERE account_id = ?",
+                    (self.account_id,),
+                ).fetchone()
                 conn.execute(
                     "UPDATE account SET realized_pl_total = 0 "
                     "WHERE account_id = ?",
                     (self.account_id,),
+                )
+                _ledger.record(
+                    conn,
+                    account_id=self.account_id,
+                    amount=float(cash_row["cash"]),
+                    reason="initial_capital",
+                    recorded_at_iso=now,
+                    notes="Account reset (cash preserved)",
                 )
         logger.info("RESET account %s", self.account_id)
 
@@ -1112,6 +1275,177 @@ class IndiaPaperBroker(BrokerInterface):
             ),
             rejection_reason=row["rejection_reason"],
         )
+
+    # ── Tier-2: corporate actions ──────────────────────────────────────
+
+    def apply_split(
+        self,
+        symbol: str,
+        ratio_num: int,
+        ratio_den: int = 1,
+        ex_date: str | None = None,
+        notes: str | None = None,
+    ) -> str:
+        """Apply a stock split / bonus issue to the broker's holding.
+
+        Parameters
+        ----------
+        symbol:
+            The split symbol.
+        ratio_num, ratio_den:
+            New shares per old. A 2:1 split is ``ratio_num=2``,
+            ``ratio_den=1`` (qty doubles, avg_cost halves). A 1:1 bonus
+            is the same as 2:1 split (one new share per share held).
+            A 1:5 reverse split is ``ratio_num=1, ratio_den=5``.
+        ex_date:
+            ISO date string. Defaults to today (IST).
+        notes:
+            Optional free-text annotation stored on the action row.
+
+        Returns the action id. Idempotency is *not* enforced — calling
+        twice applies the split twice. Wrap in your own dedup if needed.
+        """
+        from fractions import Fraction
+
+        if ratio_num <= 0 or ratio_den <= 0:
+            raise ValueError("ratio components must be positive integers")
+        ratio = Fraction(ratio_num, ratio_den)
+        ex_date = ex_date or datetime.now(IST).date().isoformat()
+        now = datetime.now(IST).isoformat()
+
+        with self.persistence.transaction() as conn:
+            action_id = _corporate_actions.record_split(
+                conn,
+                symbol=symbol,
+                exchange=self.default_exchange.value,
+                ratio=ratio,
+                ex_date=ex_date,
+                applied_at_iso=now,
+                notes=notes,
+            )
+            existing = conn.execute(
+                "SELECT qty, avg_cost FROM positions "
+                "WHERE account_id = ? AND symbol = ?",
+                (self.account_id, symbol),
+            ).fetchone()
+            if existing is None:
+                # No holding — record the action for audit; nothing to update.
+                logger.info(
+                    "SPLIT %s %d:%d recorded; no holding to adjust",
+                    symbol, ratio_num, ratio_den,
+                )
+                return action_id
+
+            old_qty = existing["qty"]
+            old_avg = existing["avg_cost"]
+            # qty *= ratio; avg_cost /= ratio. Total cost basis preserved.
+            new_qty = old_qty * (ratio_num / ratio_den)
+            new_avg = old_avg * (ratio_den / ratio_num)
+            conn.execute(
+                "UPDATE positions SET qty = ?, avg_cost = ? "
+                "WHERE account_id = ? AND symbol = ?",
+                (new_qty, new_avg, self.account_id, symbol),
+            )
+
+        logger.info(
+            "SPLIT %s %d:%d applied to %s: %g → %g shares (avg ₹%.4f → ₹%.4f)",
+            symbol, ratio_num, ratio_den, self.account_id,
+            old_qty, new_qty, old_avg, new_avg,
+        )
+        return action_id
+
+    def apply_dividend(
+        self,
+        symbol: str,
+        amount_per_share: float,
+        ex_date: str | None = None,
+        notes: str | None = None,
+    ) -> str:
+        """Apply a cash dividend to the broker's holding.
+
+        Credits ``amount_per_share * qty_held`` to the account's cash
+        on the ex-date. The credit lands in the ledger as a
+        ``dividend`` row.
+
+        Tax-aware behavior is *not* modeled: in reality, Indian dividend
+        income is taxable to the recipient (and TDS may apply for some
+        holders), but that's beyond the scope of a paper simulator.
+
+        Returns the action id. Calling twice on the same dividend
+        double-credits — wrap in your own dedup if needed.
+        """
+        if amount_per_share <= 0:
+            raise ValueError("amount_per_share must be positive")
+        ex_date = ex_date or datetime.now(IST).date().isoformat()
+        now = datetime.now(IST).isoformat()
+
+        with self.persistence.transaction() as conn:
+            action_id = _corporate_actions.record_dividend(
+                conn,
+                symbol=symbol,
+                exchange=self.default_exchange.value,
+                amount_per_share=amount_per_share,
+                ex_date=ex_date,
+                applied_at_iso=now,
+                notes=notes,
+            )
+            row = conn.execute(
+                "SELECT qty FROM positions "
+                "WHERE account_id = ? AND symbol = ?",
+                (self.account_id, symbol),
+            ).fetchone()
+            if row is None or row["qty"] <= 0:
+                logger.info(
+                    "DIVIDEND %s ₹%.4f/sh recorded; no holding to credit",
+                    symbol, amount_per_share,
+                )
+                return action_id
+
+            credit = row["qty"] * amount_per_share
+            conn.execute(
+                "UPDATE account SET cash = cash + ? WHERE account_id = ?",
+                (credit, self.account_id),
+            )
+            _ledger.record(
+                conn,
+                account_id=self.account_id,
+                amount=credit,
+                reason="dividend",
+                recorded_at_iso=now,
+                symbol=symbol,
+                notes=f"Dividend ₹{amount_per_share}/sh × {row['qty']:g}",
+            )
+
+        logger.info(
+            "DIVIDEND %s ₹%.4f/sh credited ₹%.2f to %s",
+            symbol, amount_per_share, credit, self.account_id,
+        )
+        return action_id
+
+    # ── Tier-2: ledger access ──────────────────────────────────────────
+
+    def get_cash_movements(self, limit: int = 200) -> list[_ledger.CashMovement]:
+        """Recent cash-ledger rows for this account, newest first."""
+        with self.persistence.read() as conn:
+            return _ledger.list_for_account(conn, self.account_id, limit=limit)
+
+    def verify_cash_invariant(self, tolerance: float = 0.01) -> bool:
+        """Assert ``account.cash == sum(cash_movements.amount)``.
+
+        Returns True if the invariant holds within ``tolerance`` (₹0.01
+        absolute by default — paise rounding only).
+
+        Run this from tests, audits, or a periodic health check. A False
+        result means there's a code path mutating ``account.cash``
+        without writing a matching ledger row, which is a bug.
+        """
+        with self.persistence.read() as conn:
+            cash = conn.execute(
+                "SELECT cash FROM account WHERE account_id = ?",
+                (self.account_id,),
+            ).fetchone()["cash"]
+            ledger_total = _ledger.sum_for_account(conn, self.account_id)
+        return abs(cash - ledger_total) <= tolerance
 
     # ── Utilities ───────────────────────────────────────────────────────
 

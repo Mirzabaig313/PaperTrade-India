@@ -27,7 +27,7 @@ The simulator deliberately does **not** model:
 - Options or F&O
 - Partial fills on limit orders
 - Order-book / auction / pre-open behavior
-- Corporate actions (splits, dividends, bonuses) — manual `reset()` for now
+- Mergers, spin-offs, rights issues (only splits + cash dividends in v0.2)
 - Real-time tick data — yfinance is 15-minute delayed
 
 These are documented limitations, not bugs. Add them only when a real use
@@ -63,6 +63,14 @@ for the full landscape review.
 - **Broker presets** — named `FeeConfig` for Zerodha, Upstox, Groww,
   Angel One, ICICIdirect (delivery + intraday variants).
 - **Symbol master** — track tradeable symbols, reject delisted symbols.
+- **Immutable cash ledger** — every cash mutation is an append-only
+  row; ``verify_cash_invariant()`` asserts cash == sum(movements).
+- **Corporate actions** — `apply_split` and `apply_dividend` for stock
+  splits, bonus issues, and cash dividends.
+- **Date-versioned fee schedules** — pick the right `FeeConfig` based
+  on trade date when statutory rates change mid-year.
+- **Stale-price hard-reject** — autonomous-mode flag to refuse fills
+  when the price came from the long-lived cache rather than a live feed.
 - Optional CLI for inspecting state.
 - Optional MCP server example so any LLM agent (Claude Desktop, Cursor,
   custom agents) can use the broker as a tool.
@@ -231,6 +239,59 @@ with broker.persistence.transaction() as conn:
 # Mark a symbol delisted (rejected even in lenient mode)
 with broker.persistence.transaction() as conn:
     broker.symbol_master.delist(conn, "OLDCO", Exchange.NSE)
+```
+
+### Cash ledger
+
+Every cash mutation is recorded as an append-only row. Verify the
+invariant `account.cash == sum(cash_movements)` any time:
+
+```python
+broker.buy("RELIANCE", 5)
+broker.sell("RELIANCE", 5)
+
+assert broker.verify_cash_invariant()  # always True
+
+for m in broker.get_cash_movements(limit=10):
+    print(m.recorded_at, m.reason, m.amount, m.order_id)
+```
+
+### Corporate actions
+
+```python
+# 2:1 split (qty doubles, avg_cost halves; total basis preserved)
+broker.apply_split("RELIANCE", ratio_num=2, ratio_den=1)
+
+# 1:5 reverse split
+broker.apply_split("PENNYSTOCK", ratio_num=1, ratio_den=5)
+
+# Cash dividend ₹12.50/share
+broker.apply_dividend("ITC", amount_per_share=12.50, notes="Q4 FY26")
+```
+
+### Date-versioned fee schedule
+
+```python
+from datetime import date
+from papertrade_india import FeeConfig, FeeSchedule, IndiaPaperBroker
+
+schedule = FeeSchedule(
+    default=FeeConfig(stt_pct_buy=0.0010),
+    effective_from={
+        date(2026, 4, 1): FeeConfig(stt_pct_buy=0.00125),  # hypothetical hike
+    },
+)
+broker = IndiaPaperBroker(fee_config=schedule)
+# Orders before 2026-04-01 use 0.10% STT; orders on/after use 0.125%.
+```
+
+### Stale-price hard-reject
+
+```python
+# Autonomous-agent mode: refuse to fill on cached stale prices.
+# An outage that exhausts yfinance + jugaad raises StalePriceRejected
+# instead of executing on potentially-hours-old data.
+broker = IndiaPaperBroker(enforce_fresh_prices=True)
 ```
 
 ## How fees are modelled

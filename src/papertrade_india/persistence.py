@@ -23,7 +23,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from . import corporate_actions as _corporate_actions
 from . import idempotency as _idempotency
+from . import ledger as _ledger
 from . import symbols as _symbols
 
 PathLike = str | Path
@@ -115,7 +117,12 @@ CREATE INDEX IF NOT EXISTS idx_trades_account_executed
 # Tier-1 add-on schemas. Each lives in its own module for cohesion (the
 # idempotency / symbol-master logic stays alongside its schema), and we
 # concatenate them here so a fresh DB picks them up on first connect.
-EXTENSION_SCHEMAS = (_idempotency.SCHEMA, _symbols.SCHEMA)
+EXTENSION_SCHEMAS = (
+    _idempotency.SCHEMA,
+    _symbols.SCHEMA,
+    _ledger.SCHEMA,
+    _corporate_actions.SCHEMA,
+)
 
 
 class Persistence:
