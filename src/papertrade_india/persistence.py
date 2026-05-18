@@ -24,6 +24,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from . import corporate_actions as _corporate_actions
+from . import events as _events
 from . import idempotency as _idempotency
 from . import ledger as _ledger
 from . import symbols as _symbols
@@ -122,6 +123,7 @@ EXTENSION_SCHEMAS = (
     _symbols.SCHEMA,
     _ledger.SCHEMA,
     _corporate_actions.SCHEMA,
+    _events.SCHEMA,
 )
 
 

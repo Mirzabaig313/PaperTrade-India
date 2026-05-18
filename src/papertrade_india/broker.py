@@ -47,6 +47,7 @@ import uuid
 from datetime import datetime
 
 from . import corporate_actions as _corporate_actions
+from . import events as _events
 from . import idempotency as _idempotency
 from . import ledger as _ledger
 from .exceptions import (
@@ -61,7 +62,7 @@ from .exceptions import (
 )
 from .fees import FeeConfig, FeeSchedule, IndianFeeEngine
 from .interface import BrokerInterface
-from .market_hours import IST, NSECalendar
+from .market_hours import IST, NSECalendar, SessionPhase
 from .models import (
     Account,
     Exchange,
@@ -71,6 +72,8 @@ from .models import (
     OrderType,
     Position,
 )
+from .observability import BrokerEvent, EventBus
+from .partial_fills import PartialFillConfig
 from .persistence import PathLike, Persistence
 from .price_feed import PriceFeed, Quote
 from .risk import RiskConfig, RiskContext, RiskEngine
@@ -118,6 +121,8 @@ class IndiaPaperBroker(BrokerInterface):
         risk_config: RiskConfig | None = None,
         symbol_master: SymbolMaster | None = None,
         enforce_fresh_prices: bool = False,
+        partial_fill_config: PartialFillConfig | None = None,
+        event_bus: EventBus | None = None,
     ) -> None:
         """Construct a broker bound to ``account_id`` in ``db_path``.
 
@@ -152,6 +157,17 @@ class IndiaPaperBroker(BrokerInterface):
         underlying price came from the long-lived stale-price cache.
         Use for autonomous-agent deployments where halting is safer
         than executing on a stale price.
+
+        Tier-3 collaborators
+        --------------------
+        ``partial_fill_config``: configurable per-tick fill cap on limit
+        orders. Defaults to ``PartialFillConfig(enabled=False)`` —
+        legacy all-or-nothing fills.
+
+        ``event_bus``: in-process pub/sub for ``BrokerEvent`` callbacks.
+        Defaults to a fresh empty bus. Subscribe via ``broker.events``.
+        Events are also persisted to the ``events`` table regardless of
+        whether the bus has subscribers.
         """
         self.account_id = account_id
         self.default_exchange = exchange
@@ -178,6 +194,13 @@ class IndiaPaperBroker(BrokerInterface):
         self.risk_engine = RiskEngine(risk_config or RiskConfig())
         self.symbol_master = symbol_master or SymbolMaster(strict=False)
 
+        # Tier-3 collaborators. All-defaults = legacy behavior.
+        self.partial_fill_config = partial_fill_config or PartialFillConfig()
+        self.events: EventBus = event_bus or EventBus()
+        # Events queued during a transaction; drained to the bus after
+        # commit so subscribers never see uncommitted state.
+        self._pending_events: list[BrokerEvent] = []
+
         self._ensure_account_exists(initial_capital, strict_open=strict_open)
 
     def _fee_engine_for(self, when_iso: str) -> IndianFeeEngine:
@@ -196,6 +219,89 @@ class IndiaPaperBroker(BrokerInterface):
         return IndianFeeEngine(
             self.fee_schedule.config_on(datetime.now(IST).date())
         )
+
+    # ── Tier-3: event emission ─────────────────────────────────────────
+
+    def _emit_event(
+        self,
+        conn: sqlite3.Connection,
+        event_type: str,
+        order_id: str | None = None,
+        payload: dict | None = None,
+    ) -> None:
+        """Persist an event row AND publish to the in-process bus.
+
+        Persistence is part of the same transaction as the state change
+        that triggered the event, so the event log can never disagree
+        with what was committed. Bus delivery happens after commit
+        (caller's responsibility — we collect the BrokerEvent and the
+        caller flushes via ``_drain_pending_events``). For the simple
+        case where the caller is inside a ``with persistence.transaction()``
+        block, see ``_emit_event_now`` which queues for post-commit
+        delivery.
+        """
+        recorded_at = datetime.now(IST).isoformat()
+        _events.emit(
+            conn,
+            event_type=event_type,
+            account_id=self.account_id,
+            order_id=order_id,
+            payload=payload or {},
+            recorded_at_iso=recorded_at,
+        )
+        self._pending_events.append(
+            BrokerEvent(
+                event_type=event_type,
+                account_id=self.account_id,
+                order_id=order_id,
+                payload=dict(payload or {}),
+            )
+        )
+
+    def _drain_pending_events(self) -> None:
+        """Publish queued events to the bus. Call after each transaction
+        commits, so subscribers don't see uncommitted state."""
+        if not self._pending_events:
+            return
+        events_to_send = self._pending_events
+        self._pending_events = []
+        for ev in events_to_send:
+            self.events.publish(ev)
+
+    def _symbol_position_qty(
+        self, conn: sqlite3.Connection, symbol: str,
+    ) -> float:
+        """Return the current qty for (account_id, symbol), or 0.0."""
+        row = conn.execute(
+            "SELECT qty FROM positions WHERE account_id = ? AND symbol = ?",
+            (self.account_id, symbol),
+        ).fetchone()
+        return row["qty"] if row else 0.0
+
+    def _emit_position_events(
+        self,
+        conn: sqlite3.Connection,
+        order: Order,
+        qty_before: bool,
+        qty_after: float,
+    ) -> None:
+        """Emit position_opened / position_closed when the position
+        boundary crosses zero. ``qty_before`` is a bool (held / not held);
+        we only care about the open/close edges."""
+        if not qty_before and qty_after > 0:
+            self._emit_event(
+                conn,
+                event_type="position_opened",
+                order_id=order.id,
+                payload={"symbol": order.symbol, "qty": qty_after},
+            )
+        elif qty_before and qty_after <= _QTY_EPSILON:
+            self._emit_event(
+                conn,
+                event_type="position_closed",
+                order_id=order.id,
+                payload={"symbol": order.symbol},
+            )
 
     # ── Account lifecycle ───────────────────────────────────────────────
 
@@ -490,7 +596,25 @@ class IndiaPaperBroker(BrokerInterface):
             existing_avg_cost=existing_avg,
             equity=equity,
         )
-        self.risk_engine.check(ctx)
+        try:
+            self.risk_engine.check(ctx)
+        except Exception as e:
+            # Persist the rejection as an event before re-raising. We're
+            # outside any transaction here, so open a small one.
+            with self.persistence.transaction() as conn:
+                self._emit_event(
+                    conn,
+                    event_type="order_rejected",
+                    payload={
+                        "symbol": symbol,
+                        "side": side.value,
+                        "qty": qty,
+                        "reason": type(e).__name__,
+                        "detail": str(e),
+                    },
+                )
+            self._drain_pending_events()
+            raise
 
     def _execute_market_order(
         self,
@@ -508,6 +632,7 @@ class IndiaPaperBroker(BrokerInterface):
             side=side,
             order_type=OrderType.MARKET,
             last_price=last_price,
+            symbol=symbol,
         )
         order_id = uuid.uuid4().hex[:12]
         now = datetime.now(IST).isoformat()
@@ -519,6 +644,9 @@ class IndiaPaperBroker(BrokerInterface):
         # InsufficientFundsError / InsufficientSharesError raised from
         # _apply_* propagates out cleanly. No try/except needed here.
         with self.persistence.transaction() as conn:
+            position_existed_before = (
+                self._symbol_position_qty(conn, symbol) > 0
+            )
             if side == OrderSide.BUY:
                 self._apply_buy(
                     conn, symbol, qty, price, fees.total, now,
@@ -559,6 +687,42 @@ class IndiaPaperBroker(BrokerInterface):
                 realized_pl=realized_pl,
                 executed_at=now,
             )
+
+            # Tier-3 events.
+            self._emit_event(
+                conn,
+                event_type="order_submitted",
+                order_id=order_id,
+                payload={
+                    "symbol": symbol, "side": side.value, "qty": qty,
+                    "order_type": OrderType.MARKET.value,
+                },
+            )
+            self._emit_event(
+                conn,
+                event_type="order_filled",
+                order_id=order_id,
+                payload={
+                    "symbol": symbol, "side": side.value, "qty": qty,
+                    "fill_price": price, "fees_paid": fees.total,
+                },
+            )
+            qty_after = self._symbol_position_qty(conn, symbol)
+            order_for_events = Order(
+                id=order_id, symbol=symbol, exchange=self.default_exchange,
+                side=side, qty=qty, order_type=OrderType.MARKET,
+                status=OrderStatus.FILLED, filled_qty=qty,
+                filled_avg_price=price, limit_price=None,
+                fees_paid=fees.total, realized_pl=realized_pl,
+            )
+            self._emit_position_events(
+                conn,
+                order=order_for_events,
+                qty_before=position_existed_before,
+                qty_after=qty_after,
+            )
+
+        self._drain_pending_events()
 
         if side == OrderSide.SELL:
             logger.info(
@@ -782,6 +946,18 @@ class IndiaPaperBroker(BrokerInterface):
                 created_at=now,
                 filled_at=None,
             )
+            self._emit_event(
+                conn,
+                event_type="order_submitted",
+                order_id=order_id,
+                payload={
+                    "symbol": symbol, "side": side.value, "qty": qty,
+                    "order_type": OrderType.LIMIT.value,
+                    "limit_price": limit_price,
+                },
+            )
+
+        self._drain_pending_events()
 
         logger.info(
             "QUEUE LIMIT %s %s %s @ ₹%.2f",
@@ -791,13 +967,18 @@ class IndiaPaperBroker(BrokerInterface):
         assert order is not None
         return order
 
-    def _execute_limit_fill(self, order: Order, fill_price: float) -> None:
+    def _execute_limit_fill(
+        self,
+        order: Order,
+        fill_price: float,
+        fill_qty: float | None = None,
+    ) -> None:
         """Called by ``LimitOrderWatcher`` when market crosses limit price.
 
         Race-safety: between selecting the order and applying the fill,
         another thread might have cancelled or expired it. We claim the
-        order first (``UPDATE ... WHERE status='pending'``), and only if
-        ``rowcount == 1`` do we apply the cash/position changes.
+        order first (``UPDATE ... WHERE status='pending' OR status='partially_filled'``),
+        and only if ``rowcount == 1`` do we apply the cash/position changes.
         ``OrderNoLongerPending`` is raised on a lost race so the watcher
         can skip and move on.
 
@@ -809,6 +990,11 @@ class IndiaPaperBroker(BrokerInterface):
         watcher's price came from the long-lived stale cache, this raises
         ``StalePriceRejected`` and the order stays PENDING for the next
         tick. The watcher passes its own price; we don't re-quote here.
+
+        Partial fills: ``fill_qty`` (if provided and < remaining qty)
+        marks the order as ``PARTIALLY_FILLED`` and updates ``filled_qty``
+        rather than transitioning to ``FILLED``. Subsequent ticks fill
+        the rest.
         """
         # Optionally re-price using slippage. apply_slippage caps the
         # result by the limit so we never fill above a buy-limit or
@@ -819,32 +1005,58 @@ class IndiaPaperBroker(BrokerInterface):
             order_type=OrderType.LIMIT,
             last_price=fill_price,
             limit_price=order.limit_price,
+            symbol=order.symbol,
         )
         now = datetime.now(IST).isoformat()
         fee_engine = self._fee_engine_for(now)
+
+        # How much to fill this tick.
+        remaining = order.qty - order.filled_qty
+        if fill_qty is None or fill_qty >= remaining:
+            slice_qty = remaining
+            terminal = True
+        else:
+            slice_qty = fill_qty
+            terminal = False
+
+        if slice_qty <= 0:
+            # Nothing to fill (e.g. partial-fill config returned 0 because
+            # remaining is below min_fill_qty). Caller treats as no-op.
+            return
+
         fees = fee_engine.calculate(
-            order.side, order.qty, adjusted_price, order.exchange,
+            order.side, slice_qty, adjusted_price, order.exchange,
         )
 
+        new_filled_qty = order.filled_qty + slice_qty
+        # Cumulative average fill price across all slices.
+        prior_total = order.filled_qty * (order.filled_avg_price or 0.0)
+        new_avg_fill = (prior_total + slice_qty * adjusted_price) / new_filled_qty
+        new_status = (
+            OrderStatus.FILLED if terminal else OrderStatus.PARTIALLY_FILLED
+        )
+        cumulative_fees = order.fees_paid + fees.total
+
         with self.persistence.transaction() as conn:
-            # Claim the order first. If another thread cancelled it
-            # between our SELECT and this UPDATE, rowcount is 0 — abort
-            # before touching cash or positions.
+            # Claim the order first. Status must be PENDING (first slice)
+            # or PARTIALLY_FILLED (subsequent slices). If another thread
+            # cancelled it, rowcount = 0 and we abort cleanly.
             cur = conn.execute(
                 "UPDATE orders SET status = ?, filled_qty = ?, "
                 "filled_avg_price = ?, fees_paid = ?, realized_pl = ?, "
                 "filled_at = ? "
-                "WHERE id = ? AND account_id = ? AND status = ?",
+                "WHERE id = ? AND account_id = ? AND status IN (?, ?)",
                 (
-                    OrderStatus.FILLED.value,
-                    order.qty,
-                    adjusted_price,
-                    fees.total,
+                    new_status.value,
+                    new_filled_qty,
+                    new_avg_fill,
+                    cumulative_fees,
                     0.0,  # placeholder; rewritten below for sells
-                    now,
+                    now if terminal else None,
                     order.id,
                     self.account_id,
                     OrderStatus.PENDING.value,
+                    OrderStatus.PARTIALLY_FILLED.value,
                 ),
             )
             if cur.rowcount == 0:
@@ -852,25 +1064,28 @@ class IndiaPaperBroker(BrokerInterface):
                     f"Order {order.id} is no longer pending; skip"
                 )
 
+            position_existed_before = (
+                self._symbol_position_qty(conn, order.symbol) > 0
+            )
+
             if order.side == OrderSide.BUY:
                 self._apply_buy(
-                    conn, order.symbol, order.qty, adjusted_price,
+                    conn, order.symbol, slice_qty, adjusted_price,
                     fees.total, now, order_id=order.id,
                 )
-                realized_pl = 0.0
+                slice_realized_pl = 0.0
             else:
-                realized_pl = self._apply_sell(
-                    conn, order.symbol, order.qty, adjusted_price,
+                slice_realized_pl = self._apply_sell(
+                    conn, order.symbol, slice_qty, adjusted_price,
                     fees.total, now, order_id=order.id,
                 )
 
-            # Re-stamp realized_pl now that we know it (placeholder above
-            # was 0.0). Cheap: same row, same transaction.
-            if realized_pl != 0.0:
+            cumulative_realized_pl = order.realized_pl + slice_realized_pl
+            if cumulative_realized_pl != 0.0:
                 conn.execute(
                     "UPDATE orders SET realized_pl = ? "
                     "WHERE id = ? AND account_id = ?",
-                    (realized_pl, order.id, self.account_id),
+                    (cumulative_realized_pl, order.id, self.account_id),
                 )
 
             self._record_trade(
@@ -878,18 +1093,64 @@ class IndiaPaperBroker(BrokerInterface):
                 order_id=order.id,
                 symbol=order.symbol,
                 side=order.side,
-                qty=order.qty,
+                qty=slice_qty,
                 price=adjusted_price,
                 fees=fees.total,
-                realized_pl=realized_pl,
+                realized_pl=slice_realized_pl,
                 executed_at=now,
             )
 
-        logger.info(
-            "LIMIT FILL %s %s %s @ ₹%.2f (limit was ₹%.2f)",
-            order.side.value.upper(), order.qty, order.symbol,
-            adjusted_price, order.limit_price,
-        )
+            # Tier-3 events.
+            position_qty_after = self._symbol_position_qty(conn, order.symbol)
+            self._emit_position_events(
+                conn,
+                order=order,
+                qty_before=position_existed_before,
+                qty_after=position_qty_after,
+            )
+            if terminal:
+                self._emit_event(
+                    conn,
+                    event_type="order_filled",
+                    order_id=order.id,
+                    payload={
+                        "symbol": order.symbol,
+                        "side": order.side.value,
+                        "qty": new_filled_qty,
+                        "fill_price": adjusted_price,
+                        "fees_paid": cumulative_fees,
+                    },
+                )
+            else:
+                self._emit_event(
+                    conn,
+                    event_type="order_partially_filled",
+                    order_id=order.id,
+                    payload={
+                        "symbol": order.symbol,
+                        "side": order.side.value,
+                        "slice_qty": slice_qty,
+                        "filled_qty": new_filled_qty,
+                        "remaining_qty": order.qty - new_filled_qty,
+                        "slice_price": adjusted_price,
+                    },
+                )
+
+        self._drain_pending_events()
+
+        if terminal:
+            logger.info(
+                "LIMIT FILL %s %s %s @ ₹%.2f (limit was ₹%.2f)",
+                order.side.value.upper(), order.qty, order.symbol,
+                adjusted_price, order.limit_price,
+            )
+        else:
+            logger.info(
+                "LIMIT PARTIAL %s %s/%s %s @ ₹%.2f (limit was ₹%.2f)",
+                order.side.value.upper(),
+                slice_qty, order.qty - new_filled_qty + slice_qty,
+                order.symbol, adjusted_price, order.limit_price,
+            )
 
     # ── Read API ────────────────────────────────────────────────────────
 
@@ -1054,21 +1315,29 @@ class IndiaPaperBroker(BrokerInterface):
     # ── Order management ───────────────────────────────────────────────
 
     def cancel_order(self, order_id: str) -> bool:
-        """Cancel a pending order. Race-safe via WHERE status='pending'."""
+        """Cancel a pending or partially-filled order. Race-safe."""
         with self.persistence.transaction() as conn:
             cur = conn.execute(
                 "UPDATE orders SET status = ?, cancelled_at = ? "
-                "WHERE id = ? AND account_id = ? AND status = ?",
+                "WHERE id = ? AND account_id = ? AND status IN (?, ?)",
                 (
                     OrderStatus.CANCELLED.value,
                     datetime.now(IST).isoformat(),
                     order_id,
                     self.account_id,
                     OrderStatus.PENDING.value,
+                    OrderStatus.PARTIALLY_FILLED.value,
                 ),
             )
             cancelled = cur.rowcount == 1
+            if cancelled:
+                self._emit_event(
+                    conn,
+                    event_type="order_cancelled",
+                    order_id=order_id,
+                )
         if cancelled:
+            self._drain_pending_events()
             logger.info("CANCEL order %s", order_id)
         return cancelled
 
@@ -1084,7 +1353,15 @@ class IndiaPaperBroker(BrokerInterface):
 
         Race-safe: only flips rows currently in PENDING.
         """
+        expired_ids: list[str] = []
         with self.persistence.transaction() as conn:
+            rows = conn.execute(
+                "SELECT id FROM orders "
+                "WHERE account_id = ? AND status = ? "
+                "AND time_in_force = 'DAY'",
+                (self.account_id, OrderStatus.PENDING.value),
+            ).fetchall()
+            expired_ids = [r["id"] for r in rows]
             cur = conn.execute(
                 "UPDATE orders SET status = ?, expired_at = ? "
                 "WHERE account_id = ? AND status = ? "
@@ -1097,6 +1374,11 @@ class IndiaPaperBroker(BrokerInterface):
                 ),
             )
             n = cur.rowcount
+            for oid in expired_ids:
+                self._emit_event(
+                    conn, event_type="order_expired", order_id=oid,
+                )
+        self._drain_pending_events()
         if n:
             logger.info("EXPIRE %d DAY order(s) on account %s",
                         n, self.account_id)
@@ -1166,6 +1448,12 @@ class IndiaPaperBroker(BrokerInterface):
                     recorded_at_iso=now,
                     notes="Account reset (cash preserved)",
                 )
+            self._emit_event(
+                conn,
+                event_type="account_reset",
+                payload={"initial_capital": initial_capital},
+            )
+        self._drain_pending_events()
         logger.info("RESET account %s", self.account_id)
 
     # ── Internal helpers ────────────────────────────────────────────────
@@ -1346,7 +1634,21 @@ class IndiaPaperBroker(BrokerInterface):
                 "WHERE account_id = ? AND symbol = ?",
                 (new_qty, new_avg, self.account_id, symbol),
             )
+            self._emit_event(
+                conn,
+                event_type="corporate_action",
+                payload={
+                    "type": "split",
+                    "symbol": symbol,
+                    "ratio_num": ratio_num,
+                    "ratio_den": ratio_den,
+                    "ex_date": ex_date,
+                    "old_qty": old_qty,
+                    "new_qty": new_qty,
+                },
+            )
 
+        self._drain_pending_events()
         logger.info(
             "SPLIT %s %d:%d applied to %s: %g → %g shares (avg ₹%.4f → ₹%.4f)",
             symbol, ratio_num, ratio_den, self.account_id,
@@ -1415,7 +1717,20 @@ class IndiaPaperBroker(BrokerInterface):
                 symbol=symbol,
                 notes=f"Dividend ₹{amount_per_share}/sh × {row['qty']:g}",
             )
+            self._emit_event(
+                conn,
+                event_type="corporate_action",
+                payload={
+                    "type": "dividend",
+                    "symbol": symbol,
+                    "per_share": amount_per_share,
+                    "qty": row["qty"],
+                    "credit": credit,
+                    "ex_date": ex_date,
+                },
+            )
 
+        self._drain_pending_events()
         logger.info(
             "DIVIDEND %s ₹%.4f/sh credited ₹%.2f to %s",
             symbol, amount_per_share, credit, self.account_id,
@@ -1446,6 +1761,27 @@ class IndiaPaperBroker(BrokerInterface):
             ).fetchone()["cash"]
             ledger_total = _ledger.sum_for_account(conn, self.account_id)
         return abs(cash - ledger_total) <= tolerance
+
+    # ── Tier-3: event log + session phase ──────────────────────────────
+
+    def get_events(
+        self,
+        limit: int = 200,
+        event_types: tuple[str, ...] | None = None,
+    ) -> list[_events.Event]:
+        """Recent events for this account, newest first.
+
+        ``event_types`` filters by types when provided, e.g.
+        ``event_types=("order_filled", "order_partially_filled")``.
+        """
+        with self.persistence.read() as conn:
+            return _events.list_for_account(
+                conn, self.account_id, limit=limit, event_types=event_types,
+            )
+
+    def current_session_phase(self) -> SessionPhase:
+        """The active NSE session phase right now (IST)."""
+        return self.calendar.current_phase()
 
     # ── Utilities ───────────────────────────────────────────────────────
 

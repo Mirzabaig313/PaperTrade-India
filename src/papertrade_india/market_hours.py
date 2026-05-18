@@ -5,7 +5,11 @@ We enforce that market orders submitted outside trading hours are rejected
 back-of-the-envelope P&L would silently drift from reality.
 
 Hours used:
-- NSE/BSE equity: 09:15 to 15:30 IST, Monday–Friday, excluding holidays.
+- NSE/BSE equity continuous session: 09:15 to 15:30 IST, Mon–Fri,
+  excluding holidays.
+- Pre-open auction: 09:00 to 09:08 IST. Limit orders accepted; no
+  continuous fills.
+- Closing-session window: 15:40 to 16:00 IST (UCC/AMO accepted).
 
 Holiday data ships as JSON in ``data/nse_holidays_*.json``. Each year's
 list can be refreshed independently. The community can keep these files
@@ -13,6 +17,18 @@ current via PR.
 
 Time zone: Asia/Kolkata (IST). IST does not observe DST, so this is just
 UTC+5:30 year-round.
+
+Session phases (Tier 3)
+-----------------------
+The simulator models four phases per trading day:
+- ``CLOSED``: outside any session window.
+- ``PRE_OPEN``: 09:00–09:08, limit orders queue, no continuous fills.
+- ``REGULAR``: 09:15–15:30, continuous matching (what we simulate).
+- ``POST_CLOSE``: 15:40–16:00, AMO/closing-session window.
+
+The broker's market-orders-only-during-REGULAR rule preserves backward
+compatibility (``is_market_open`` returns True only during REGULAR).
+``current_phase`` exposes the full state for callers that care.
 """
 
 from __future__ import annotations
@@ -20,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date, datetime, time, timedelta
+from enum import Enum
 from pathlib import Path
 
 try:
@@ -32,6 +49,21 @@ logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 NSE_OPEN = time(9, 15)
 NSE_CLOSE = time(15, 30)
+
+# Session phase boundaries.
+PRE_OPEN_START = time(9, 0)
+PRE_OPEN_END = time(9, 8)
+POST_CLOSE_START = time(15, 40)
+POST_CLOSE_END = time(16, 0)
+
+
+class SessionPhase(str, Enum):
+    """NSE session phases."""
+
+    CLOSED = "closed"
+    PRE_OPEN = "pre_open"
+    REGULAR = "regular"
+    POST_CLOSE = "post_close"
 
 
 class NSECalendar:
@@ -90,7 +122,22 @@ class NSECalendar:
         return not self.is_holiday(d)
 
     def is_market_open(self, dt: datetime | None = None) -> bool:
-        """``True`` if NSE is currently open at ``dt`` (IST)."""
+        """``True`` if NSE is in the continuous (REGULAR) session at ``dt``.
+
+        Pre-open and post-close phases return False — they're separate
+        windows where market orders shouldn't fill at last price. Use
+        ``current_phase`` to distinguish them.
+        """
+        return self.current_phase(dt) == SessionPhase.REGULAR
+
+    def current_phase(self, dt: datetime | None = None) -> SessionPhase:
+        """Return the active session phase at ``dt`` (IST).
+
+        - ``REGULAR``    09:15–15:30 (continuous matching)
+        - ``PRE_OPEN``   09:00–09:08 (limit orders queue, no fills)
+        - ``POST_CLOSE`` 15:40–16:00 (AMO / closing session)
+        - ``CLOSED``     anywhere else (incl. weekends and holidays)
+        """
         if dt is None:
             dt = datetime.now(IST)
         elif dt.tzinfo is None:
@@ -99,8 +146,16 @@ class NSECalendar:
             dt = dt.astimezone(IST)
 
         if not self.is_trading_day(dt.date()):
-            return False
-        return NSE_OPEN <= dt.time() <= NSE_CLOSE
+            return SessionPhase.CLOSED
+
+        t = dt.time()
+        if NSE_OPEN <= t <= NSE_CLOSE:
+            return SessionPhase.REGULAR
+        if PRE_OPEN_START <= t <= PRE_OPEN_END:
+            return SessionPhase.PRE_OPEN
+        if POST_CLOSE_START <= t <= POST_CLOSE_END:
+            return SessionPhase.POST_CLOSE
+        return SessionPhase.CLOSED
 
     def next_open(self, dt: datetime | None = None) -> datetime:
         """Next datetime when the market opens (IST)."""

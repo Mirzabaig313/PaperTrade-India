@@ -23,6 +23,7 @@ Public API
 
 from .broker import IndiaPaperBroker
 from .corporate_actions import CorporateAction
+from .events import Event
 from .exceptions import (
     AccountNotFoundError,
     IdempotencyConflict,
@@ -43,7 +44,7 @@ from .fees import FeeBreakdown, FeeConfig, FeeSchedule, IndianFeeEngine
 from .interface import BrokerInterface
 from .ledger import CashMovement
 from .limit_orders import LimitOrderWatcher
-from .market_hours import IST, NSECalendar
+from .market_hours import IST, NSECalendar, SessionPhase
 from .models import (
     Account,
     Exchange,
@@ -54,6 +55,8 @@ from .models import (
     Position,
     Trade,
 )
+from .observability import BrokerEvent, EventBus, stdlib_log_subscriber
+from .partial_fills import PartialFillConfig
 from .price_feed import (
     CachedLastKnownProvider,
     JugaadDataProvider,
@@ -80,6 +83,7 @@ __all__ = [
     "OrderSide",
     "OrderStatus",
     "OrderType",
+    "SessionPhase",
     # Fees
     "FeeBreakdown",
     "FeeConfig",
@@ -108,6 +112,12 @@ __all__ = [
     # Tier-2: ledger / corporate actions
     "CashMovement",
     "CorporateAction",
+    # Tier-3: partial fills / events / observability
+    "PartialFillConfig",
+    "Event",
+    "BrokerEvent",
+    "EventBus",
+    "stdlib_log_subscriber",
     # Exceptions
     "IndiaPaperBrokerError",
     "InsufficientFundsError",

@@ -83,6 +83,10 @@ class LimitOrderWatcher(threading.Thread):
             for o in self.broker.get_orders(status=OrderStatus.PENDING)
             if o.order_type == OrderType.LIMIT
         ]
+        # Partially-filled limit orders also need attention each tick.
+        for o in self.broker.get_orders(status=OrderStatus.PARTIALLY_FILLED):
+            if o.order_type == OrderType.LIMIT:
+                pending.append(o)
         if not pending:
             return 0
 
@@ -125,8 +129,17 @@ class LimitOrderWatcher(threading.Thread):
                 or (order.side == OrderSide.SELL and price >= order.limit_price)
             )
             if should_fill:
+                # Compute the slice qty per the partial-fill config.
+                remaining = order.qty - order.filled_qty
+                slice_qty = self.broker.partial_fill_config.fill_qty(remaining)
+                if slice_qty <= 0:
+                    # Cap config returned 0 (e.g. min_fill_qty floor).
+                    # Wait for the next tick.
+                    continue
                 try:
-                    self.broker._execute_limit_fill(order, price)
+                    self.broker._execute_limit_fill(
+                        order, price, fill_qty=slice_qty,
+                    )
                     fills += 1
                 except OrderNoLongerPending:
                     # Cancelled or expired between our SELECT and fill

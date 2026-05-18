@@ -139,3 +139,57 @@ def test_default_broker_has_zero_slippage(tmp_path, stub_provider, price_feed):
     )
     order = broker.buy("RELIANCE", 1)
     assert order.filled_avg_price == 2500.0
+
+
+
+# ── Tier-3: per-symbol overrides ─────────────────────────────────────
+
+
+def test_per_symbol_bps_overrides_default():
+    cfg = SlippageConfig(bps=5, per_symbol_bps={"PENNY": 50.0})
+    # Liquid name uses default 5 bps.
+    p_liquid = apply_slippage(
+        cfg, OrderSide.BUY, OrderType.MARKET, last_price=1000, symbol="HDFC",
+    )
+    assert p_liquid == pytest.approx(1000.5)
+    # Illiquid name uses 50 bps.
+    p_illiquid = apply_slippage(
+        cfg, OrderSide.BUY, OrderType.MARKET, last_price=1000, symbol="PENNY",
+    )
+    assert p_illiquid == pytest.approx(1005.0)
+
+
+def test_no_symbol_falls_back_to_default():
+    cfg = SlippageConfig(bps=10, per_symbol_bps={"PENNY": 50.0})
+    p = apply_slippage(cfg, OrderSide.BUY, OrderType.MARKET, last_price=1000)
+    assert p == pytest.approx(1001.0)
+
+
+def test_bps_for_lookup():
+    cfg = SlippageConfig(bps=5, per_symbol_bps={"X": 25, "Y": 100})
+    assert cfg.bps_for("X") == 25
+    assert cfg.bps_for("Y") == 100
+    assert cfg.bps_for("UNKNOWN") == 5
+
+
+def test_broker_uses_per_symbol_bps(tmp_path, stub_provider, price_feed):
+    """A broker configured with per-symbol slippage applies it on fills."""
+    from papertrade_india import IndiaPaperBroker
+
+    stub_provider.set("HDFC", 1000)
+    stub_provider.set("PENNY", 1000)
+    broker = IndiaPaperBroker(
+        initial_capital=1_000_000,
+        db_path=tmp_path / "psyms.db",
+        account_id="psyms",
+        price_feed=price_feed,
+        slippage_config=SlippageConfig(
+            bps=10,
+            per_symbol_bps={"PENNY": 100.0},  # 1% on illiquid
+        ),
+        enforce_market_hours=False,
+    )
+    o_hdfc = broker.buy("HDFC", 1)
+    o_penny = broker.buy("PENNY", 1)
+    assert o_hdfc.filled_avg_price == pytest.approx(1001.0)
+    assert o_penny.filled_avg_price == pytest.approx(1010.0)
