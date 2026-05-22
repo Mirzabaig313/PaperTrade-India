@@ -82,14 +82,44 @@ class ProductType(str, Enum):
     - ``INTRADAY`` (MIS): same-session round-trip, no DP charge, broker
       auto-squares-off any open MIS positions at 15:15 IST. Modeled
       via :class:`papertrade_india.SettlementEngine`.
+    - ``MARGIN``, ``PLEDGE``: explicit "not modeled" sentinels. The
+      simulator is cash-equity only; orders submitted with these
+      product types raise :class:`papertrade_india.MarginNotSupported`
+      so failures are loud rather than silent.
 
-    Out of scope for this simulator: NRML (overnight derivatives),
-    BO/CO (cover/bracket as separate product flags — we model bracket
-    as an order type instead), MTF (margin trading).
+    Out of scope: NRML (overnight derivatives), BO/CO (cover/bracket as
+    separate product flags — we model bracket as an order type instead),
+    MTF (margin trading).
     """
 
     DELIVERY = "delivery"
     INTRADAY = "intraday"
+    MARGIN = "margin"
+    PLEDGE = "pledge"
+
+
+class TimeInForce(str, Enum):
+    """Order lifetime / queueing behavior.
+
+    - ``DAY``: pending until the session ends, then expired by
+      :meth:`IndiaPaperBroker.expire_stale_day_orders`. The default.
+    - ``GTT`` (Good-Till-Triggered): NSE's persistent stop-style order
+      that survives across sessions. Stays PENDING across day rollovers
+      until the price condition triggers it or the user cancels.
+      Most useful with STOP_MARKET / STOP_LIMIT order types.
+    - ``IOC`` (Immediate-Or-Cancel): fill what's immediately available,
+      cancel the rest. Reserved — not yet implemented.
+    - ``AMO`` (After-Market Order): queues overnight. The watcher fires
+      it at the next session open. Supported for MARKET and LIMIT.
+
+    The string is held on :attr:`Order.time_in_force` for back-compat;
+    this enum is the authoritative set of values the simulator supports.
+    """
+
+    DAY = "DAY"
+    GTT = "GTT"
+    IOC = "IOC"
+    AMO = "AMO"
 
 
 Currency = Literal["INR", "USD"]

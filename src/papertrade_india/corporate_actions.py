@@ -83,14 +83,98 @@ def record_split(
     applied_at_iso: str,
     notes: str | None = None,
 ) -> str:
+    return _record_ratio_action(
+        conn, symbol=symbol, exchange=exchange, action_type="split",
+        ratio=ratio, ex_date=ex_date, applied_at_iso=applied_at_iso,
+        notes=notes,
+    )
+
+
+def record_bonus(
+    conn: sqlite3.Connection,
+    symbol: str,
+    exchange: str,
+    ratio: Fraction,
+    ex_date: str,
+    applied_at_iso: str,
+    notes: str | None = None,
+) -> str:
+    """Record a bonus issue.
+
+    A bonus issue gives existing shareholders ``num`` extra shares for
+    every ``den`` shares held — economically equivalent to a stock
+    split (``ratio_num+den : den``) but with its own audit trail.
+
+    Note that the *split-equivalent* ratio is ``(num + den) / den`` —
+    a 1:1 bonus doubles holdings (split-equivalent 2:1), 1:2 bonus =
+    3:2 split-equivalent. We store the bonus's bonus-style ratio as
+    given so the audit trail stays honest, and the broker computes
+    the split equivalent at apply time.
+    """
+    return _record_ratio_action(
+        conn, symbol=symbol, exchange=exchange, action_type="bonus",
+        ratio=ratio, ex_date=ex_date, applied_at_iso=applied_at_iso,
+        notes=notes,
+    )
+
+
+def record_rights(
+    conn: sqlite3.Connection,
+    symbol: str,
+    exchange: str,
+    ratio: Fraction,
+    subscription_price: float,
+    ex_date: str,
+    applied_at_iso: str,
+    notes: str | None = None,
+) -> str:
+    """Record a rights issue.
+
+    Existing shareholders are entitled to subscribe to ``num`` new
+    shares for every ``den`` held, at a fixed ``subscription_price``
+    that's typically below market. We store the entitlement ratio in
+    ``ratio_num`` / ``ratio_den`` and the price in ``amount_per_share``
+    (overloading that column — semantics swap based on
+    ``action_type``).
+
+    The simulator's :meth:`IndiaPaperBroker.apply_rights` records the
+    action and increments the position by the subscription if the
+    user opts in. Skipping is the default — the rights then lapse
+    (no position change).
+    """
     action_id = uuid.uuid4().hex[:12]
     conn.execute(
         "INSERT INTO corporate_actions "
         "(id, symbol, exchange, action_type, ratio_num, ratio_den, "
         "amount_per_share, ex_date, notes, applied_at) "
-        "VALUES (?, ?, ?, 'split', ?, ?, NULL, ?, ?, ?)",
+        "VALUES (?, ?, ?, 'rights', ?, ?, ?, ?, ?, ?)",
         (
             action_id, symbol, exchange,
+            ratio.numerator, ratio.denominator,
+            subscription_price, ex_date, notes, applied_at_iso,
+        ),
+    )
+    return action_id
+
+
+def _record_ratio_action(
+    conn: sqlite3.Connection,
+    symbol: str,
+    exchange: str,
+    action_type: str,
+    ratio: Fraction,
+    ex_date: str,
+    applied_at_iso: str,
+    notes: str | None,
+) -> str:
+    action_id = uuid.uuid4().hex[:12]
+    conn.execute(
+        "INSERT INTO corporate_actions "
+        "(id, symbol, exchange, action_type, ratio_num, ratio_den, "
+        "amount_per_share, ex_date, notes, applied_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+        (
+            action_id, symbol, exchange, action_type,
             ratio.numerator, ratio.denominator,
             ex_date, notes, applied_at_iso,
         ),

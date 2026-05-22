@@ -158,3 +158,26 @@ class RandomBrokerRejection(IndiaPaperBrokerError):  # noqa: N818
     RandomBrokerRejection`` readable; the base already carries the
     ``Error`` suffix.
     """
+
+
+# ── Out-of-scope features ────────────────────────────────────────────
+
+
+class MarginNotSupported(IndiaPaperBrokerError):  # noqa: N818
+    """The simulator is cash-equity only; this order would require
+    margin or pledge accounting.
+
+    Raised whenever an order is submitted with ``ProductType.MARGIN``
+    or ``ProductType.PLEDGE``. Loud failure beats silent acceptance —
+    an agent that thinks it's running margin should know the simulator
+    isn't modeling its real-money risk.
+    """
+
+
+class AMOWindowClosedError(IndiaPaperBrokerError):
+    """Tried to submit an AMO outside its accepted window.
+
+    Real Indian brokers accept AMO only between the post-close window
+    and ~08:58 IST the next morning. Submissions inside the regular
+    session are rejected — they should be plain MARKET / LIMIT orders.
+    """

@@ -216,6 +216,62 @@ def _v2_realism_extensions(conn: sqlite3.Connection) -> None:
     # FK enforcement restored automatically at COMMIT.
 
 
+# ── Migration 003: bonus / rights as first-class corporate-action types ──
+
+
+@migration(3)
+def _v3_bonus_and_rights(conn: sqlite3.Connection) -> None:
+    """Widen ``corporate_actions.action_type`` to include 'bonus' and
+    'rights' (and 'merger', 'spinoff' for forward compat).
+
+    Why a rebuild rather than ALTER + new check
+    -------------------------------------------
+    SQLite can't drop or relax a CHECK constraint on an existing column
+    via ALTER. We rebuild the table with the wider domain and copy the
+    data, same as v2 did for ``orders``.
+
+    Existing rows with ``action_type='split'`` or ``'dividend'`` keep
+    their meaning. Bonus issues that were previously routed through
+    ``apply_split`` are *not* retroactively reclassified — that would
+    rewrite history. Going forward, callers should use
+    :meth:`IndiaPaperBroker.apply_bonus` and
+    :meth:`IndiaPaperBroker.apply_rights` to record the proper type.
+    """
+    conn.execute("PRAGMA defer_foreign_keys=ON")
+    conn.execute(
+        """
+        CREATE TABLE corporate_actions_new (
+            id TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            exchange TEXT NOT NULL,
+            action_type TEXT NOT NULL CHECK(action_type IN (
+                'split', 'dividend', 'bonus', 'rights', 'merger', 'spinoff'
+            )),
+            ratio_num INTEGER,
+            ratio_den INTEGER,
+            amount_per_share REAL,
+            ex_date TEXT NOT NULL,
+            notes TEXT,
+            applied_at TEXT NOT NULL
+        )
+        """,
+    )
+    conn.execute(
+        """
+        INSERT INTO corporate_actions_new
+        SELECT id, symbol, exchange, action_type, ratio_num, ratio_den,
+               amount_per_share, ex_date, notes, applied_at
+        FROM corporate_actions
+        """,
+    )
+    conn.execute("DROP TABLE corporate_actions")
+    conn.execute("ALTER TABLE corporate_actions_new RENAME TO corporate_actions")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_corporate_actions_symbol_date "
+        "ON corporate_actions(symbol, ex_date)",
+    )
+
+
 # ── Public API ─────────────────────────────────────────────────────────
 
 
