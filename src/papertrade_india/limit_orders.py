@@ -25,6 +25,7 @@ import threading
 from typing import TYPE_CHECKING
 
 from .exceptions import OrderNoLongerPending, StalePriceRejected
+from .market_hours import SessionPhase
 from .models import OrderSide, OrderStatus, OrderType
 
 if TYPE_CHECKING:  # avoid runtime circular import
@@ -56,6 +57,9 @@ class LimitOrderWatcher(threading.Thread):
         idempotency_ttl_hours: int = 24,
         settle_due_every: int | None = None,
         auto_square_off_intraday: bool = True,
+        run_pre_open_auction: bool = True,
+        fire_amo_at_open: bool = True,
+        expire_day_orders_at_close: bool = True,
     ) -> None:
         """Construct a watcher.
 
@@ -94,7 +98,13 @@ class LimitOrderWatcher(threading.Thread):
         self._idempotency_ttl_hours = idempotency_ttl_hours
         self._settle_due_every = settle_due_every
         self._auto_square_off_intraday = auto_square_off_intraday
+        self._run_pre_open_auction = run_pre_open_auction
+        self._fire_amo_at_open = fire_amo_at_open
+        self._expire_day_orders_at_close = expire_day_orders_at_close
         self._squared_off_today = False
+        self._auction_done_today = False
+        self._amo_fired_today = False
+        self._day_expired_today = False
         self._last_settle_date = None
         self._tick_count = 0
 
@@ -147,6 +157,68 @@ class LimitOrderWatcher(threading.Thread):
             self._maybe_settle_due()
             self._last_settle_date = today
             self._squared_off_today = False
+            self._auction_done_today = False
+            self._amo_fired_today = False
+            self._day_expired_today = False
+
+        # Pre-open auction at the PRE_OPEN → REGULAR transition.
+        # Run it at the first REGULAR-phase tick of the day.
+        # When ``enforce_market_hours`` is off the broker is being
+        # driven manually (typical in tests / backtests), so we leave
+        # phase-driven housekeeping to the test code rather than firing
+        # auction / AMO / expiry against arbitrary wall-clock state.
+        phase = self.broker.calendar.current_phase(self.broker.clock.now())
+        run_phase_hooks = self.broker.enforce_market_hours
+        if (
+            run_phase_hooks
+            and self._run_pre_open_auction
+            and not self._auction_done_today
+            and phase == SessionPhase.REGULAR
+        ):
+            try:
+                match = self.broker.run_pre_open_auction()
+                if match.matched_volume > 0:
+                    logger.info(
+                        "Pre-open auction: %d shares matched at ₹%.2f",
+                        int(match.matched_volume),
+                        match.equilibrium_price or 0.0,
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.exception("Pre-open auction failed: %s", e)
+            self._auction_done_today = True
+
+        # Fire any pending AMO market orders at session open.
+        if (
+            run_phase_hooks
+            and self._fire_amo_at_open
+            and not self._amo_fired_today
+            and phase == SessionPhase.REGULAR
+        ):
+            try:
+                self.broker.fire_amo_orders()
+            except Exception as e:  # noqa: BLE001
+                logger.exception("AMO firing failed: %s", e)
+            self._amo_fired_today = True
+
+        # Expire DAY orders once we're past close.
+        if (
+            run_phase_hooks
+            and self._expire_day_orders_at_close
+            and not self._day_expired_today
+            and phase in (SessionPhase.POST_CLOSE, SessionPhase.CLOSED)
+        ):
+            # Only expire if we're past 15:30 today; CLOSED on a holiday
+            # / weekend morning shouldn't expire orders submitted
+            # against the previous trading day's session — those should
+            # still queue for the next REGULAR open. The simplest
+            # heuristic: only expire when CLOSED/POST_CLOSE on what was
+            # actually a trading day.
+            if self.broker.calendar.is_trading_day(today):
+                try:
+                    self.broker.expire_stale_day_orders()
+                except Exception as e:  # noqa: BLE001
+                    logger.exception("DAY-order expiry failed: %s", e)
+            self._day_expired_today = True
 
         # Intraday auto-square-off, opt-in.
         if (

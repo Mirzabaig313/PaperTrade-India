@@ -53,10 +53,12 @@ from . import ledger as _ledger
 from .clock import Clock, WallClock
 from .exceptions import (
     AccountNotFoundError,
+    AMOWindowClosedError,
     IdempotencyConflict,
     InsufficientFundsError,
     InsufficientSharesError,
     InvalidOrderError,
+    MarginNotSupported,
     MarketClosedError,
     OrderNoLongerPending,
     RandomBrokerRejection,
@@ -86,6 +88,7 @@ from .models import (
 from .observability import BrokerEvent, EventBus
 from .partial_fills import PartialFillConfig
 from .persistence import PathLike, Persistence
+from .preopen import AuctionMatch, _BookRow, compute_equilibrium
 from .price_feed import PriceFeed, Quote
 from .risk import RiskConfig, RiskContext, RiskEngine
 from .settlement import SettlementConfig, SettlementEngine, SettlementMode
@@ -471,6 +474,13 @@ class IndiaPaperBroker(BrokerInterface):
     ) -> Order:
         if qty <= 0:
             raise InvalidOrderError("qty must be positive")
+        if product_type in (ProductType.MARGIN, ProductType.PLEDGE):
+            raise MarginNotSupported(
+                f"product_type={product_type.value} requires margin / pledge "
+                "accounting which the cash-equity simulator does not model. "
+                "Use ProductType.DELIVERY (T+1 cash) or "
+                "ProductType.INTRADAY (same-day, auto-square-off).",
+            )
         if order_type == OrderType.LIMIT and limit_price is None:
             raise InvalidOrderError(
                 "limit_price required for LIMIT orders"
@@ -543,17 +553,60 @@ class IndiaPaperBroker(BrokerInterface):
         )
         self._risk_check(side, symbol, qty, risk_price_for_check)
 
-        market_open = self.calendar.is_market_open(self._clock.now())
+        # ── Time-in-force + session-phase rules ──────────────────────
+        # 1. Reject unsupported TIFs early.
+        # 2. AMO must be submitted in the AMO window (not during REGULAR).
+        # 3. MARKET orders during PRE_OPEN/POST_CLOSE/CLOSED are rejected
+        #    UNLESS they're AMO, in which case they queue for next open.
+        # 4. LIMIT and STOP orders queue normally outside REGULAR.
+        # 5. GTT orders survive across sessions (handled at expiry time
+        #    by ``expire_stale_day_orders``).
+        # ``GTC`` is accepted as an alias for ``GTT`` — Indian brokers
+        # use both terms interchangeably for "good-till-triggered /
+        # cancelled" persistent orders.
+        valid_tif = {"DAY", "GTT", "GTC", "AMO", "IOC"}
+        if time_in_force not in valid_tif:
+            raise InvalidOrderError(
+                f"Unsupported time_in_force {time_in_force!r}. "
+                f"Valid: {sorted(valid_tif)}",
+            )
+        if time_in_force == "IOC":
+            # Reserved for future; reject loudly rather than silently
+            # treat as DAY.
+            raise InvalidOrderError(
+                "time_in_force='IOC' is reserved and not yet implemented. "
+                "Use 'DAY' for normal session orders.",
+            )
+
+        phase = self.calendar.current_phase(self._clock.now())
+        is_amo = time_in_force == "AMO"
+
+        if is_amo and phase == SessionPhase.REGULAR:
+            raise AMOWindowClosedError(
+                "AMO orders cannot be submitted during the REGULAR session. "
+                "Submit AMOs after market close (POST_CLOSE / CLOSED) so "
+                "they queue for the next open. For an in-session order, "
+                "use time_in_force='DAY'.",
+            )
+
+        # The "market open" gate keeps its semantics:
+        # - REGULAR: anything goes.
+        # - PRE_OPEN: limit orders queue; market orders are rejected
+        #   (they fill at the auction equilibrium, not at last price).
+        # - POST_CLOSE / CLOSED: market orders rejected unless AMO; limit
+        #   orders queue.
+        market_open = phase == SessionPhase.REGULAR
         if (
             self.enforce_market_hours
             and not market_open
             and order_type == OrderType.MARKET
+            and not is_amo
         ):
-            phase = self.calendar.current_phase(self._clock.now())
             raise MarketClosedError(
                 f"Cannot fill MARKET order — current phase: {phase.value}. "
                 f"Next REGULAR open: {self.calendar.next_open(self._clock.now())}. "
-                f"Use a LIMIT order to queue for the next session."
+                f"Use time_in_force='AMO' to queue for the next session, "
+                f"or a LIMIT order during PRE_OPEN.",
             )
 
         # T+1 deliverable-qty check on sells (DELIVERY product only).
@@ -565,9 +618,16 @@ class IndiaPaperBroker(BrokerInterface):
             self._t_plus_1_sellable_check(symbol, qty)
 
         if order_type == OrderType.MARKET:
-            order = self._execute_market_order(
-                symbol, qty, side, time_in_force, product_type=product_type,
-            )
+            if is_amo:
+                # AMO market orders queue overnight; the watcher fires
+                # them at the next session open.
+                order = self._queue_amo_market_order(
+                    symbol, qty, side, time_in_force, product_type,
+                )
+            else:
+                order = self._execute_market_order(
+                    symbol, qty, side, time_in_force, product_type=product_type,
+                )
         elif order_type == OrderType.LIMIT:
             assert limit_price is not None  # guarded above
             order = self._queue_limit_order(
@@ -1236,6 +1296,177 @@ class IndiaPaperBroker(BrokerInterface):
         assert order is not None
         return order
 
+    # ── AMO: queue MARKET orders overnight ────────────────────────────
+
+    def _queue_amo_market_order(
+        self,
+        symbol: str,
+        qty: float,
+        side: OrderSide,
+        time_in_force: str,
+        product_type: ProductType,
+    ) -> Order:
+        """Queue an AMO market order. Fires at next session open via
+        :meth:`fire_amo_orders` (the watcher calls this automatically).
+
+        We persist it as PENDING with ``order_type=MARKET``,
+        ``time_in_force='AMO'``. Distinguishing from a regular pending
+        market order is via the TIF — regular markets never persist
+        as PENDING, only AMOs do.
+        """
+        order_id = uuid.uuid4().hex[:12]
+        now = self._now_iso()
+        with self.persistence.transaction() as conn:
+            self._record_order(
+                conn,
+                order_id=order_id,
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                order_type=OrderType.MARKET,
+                status=OrderStatus.PENDING,
+                filled_qty=0.0,
+                filled_avg_price=None,
+                limit_price=None,
+                fees_paid=0.0,
+                realized_pl=0.0,
+                time_in_force=time_in_force,
+                created_at=now,
+                filled_at=None,
+                product_type=product_type,
+            )
+            self._emit_event(
+                conn,
+                event_type="order_submitted",
+                order_id=order_id,
+                payload={
+                    "symbol": symbol, "side": side.value, "qty": qty,
+                    "order_type": OrderType.MARKET.value,
+                    "time_in_force": "AMO",
+                    "product_type": product_type.value,
+                },
+            )
+        self._drain_pending_events()
+        logger.info(
+            "QUEUE AMO MARKET %s %s %s (fires at next open)",
+            side.value.upper(), qty, symbol,
+        )
+        out = self.get_order(order_id)
+        assert out is not None
+        return out
+
+    def fire_amo_orders(self) -> int:
+        """Fill every pending AMO market order at the current price.
+
+        Idempotent within a session: orders flip from PENDING to FILLED
+        atomically, so a second call after the first fires nothing.
+        Intended to be called once at REGULAR-phase open by the watcher.
+
+        Returns the count of AMO orders fired.
+        """
+        with self.persistence.read() as conn:
+            rows = conn.execute(
+                "SELECT id FROM orders "
+                "WHERE account_id = ? AND status = ? "
+                "AND order_type = ? AND time_in_force = 'AMO'",
+                (
+                    self.account_id, OrderStatus.PENDING.value,
+                    OrderType.MARKET.value,
+                ),
+            ).fetchall()
+        ids = [r["id"] for r in rows]
+        n = 0
+        for oid in ids:
+            try:
+                self._fill_pending_market_parent(oid)
+                n += 1
+            except Exception as e:  # noqa: BLE001 — keep going on per-order failures
+                logger.warning("AMO fire failed for %s: %s", oid, e)
+        if n:
+            logger.info("Fired %d AMO market order(s)", n)
+        return n
+
+    # ── Pre-open call auction ─────────────────────────────────────────
+
+    def run_pre_open_auction(self) -> AuctionMatch:
+        """Match all PENDING limit orders for this account at the
+        equilibrium price.
+
+        Called by the watcher at the PRE_OPEN → REGULAR transition
+        (or manually for tests). Implements NSE's call-auction rules:
+        max executable volume → min imbalance → closest to reference
+        price → higher price.
+
+        Returns the :class:`AuctionMatch`. ``equilibrium_price=None``
+        when no overlap exists (no fills happen).
+
+        Symbol scoping: the auction runs **per symbol**. We loop over
+        every symbol with at least one PENDING limit on this account.
+        """
+        all_pending = [
+            o for o in self.get_orders(status=OrderStatus.PENDING, limit=10_000)
+            if o.order_type == OrderType.LIMIT
+            and o.parent_order_id is None  # bracket children gate on parent
+            and o.time_in_force in ("DAY", "GTT")
+        ]
+        if not all_pending:
+            return AuctionMatch(equilibrium_price=None, matched_volume=0.0, fills=[])
+
+        # Group by symbol.
+        by_symbol: dict[str, list[Order]] = {}
+        for o in all_pending:
+            by_symbol.setdefault(o.symbol, []).append(o)
+
+        all_fills: list[tuple[str, float, float]] = []
+        total_matched = 0.0
+        last_price: float | None = None
+        for symbol, orders in by_symbol.items():
+            buys = [
+                _BookRow(
+                    price=o.limit_price,  # type: ignore[arg-type]
+                    qty=o.qty - o.filled_qty,
+                    order_id=o.id,
+                    submission_seq=int(o.created_at.timestamp() * 1000),
+                )
+                for o in orders if o.side == OrderSide.BUY
+            ]
+            sells = [
+                _BookRow(
+                    price=o.limit_price,  # type: ignore[arg-type]
+                    qty=o.qty - o.filled_qty,
+                    order_id=o.id,
+                    submission_seq=int(o.created_at.timestamp() * 1000),
+                )
+                for o in orders if o.side == OrderSide.SELL
+            ]
+            ref = self._safe_prev_close(symbol) or self._safe_last_price_for_risk(symbol)
+            match = compute_equilibrium(
+                buys=buys, sells=sells, reference_price=ref or None,
+            )
+            if match.equilibrium_price is None:
+                continue
+            for fill_id, fill_qty, fill_price in match.fills:
+                # Apply the fill via the standard limit-fill path so
+                # fees, ledger, settlement, and events all flow through
+                # the canonical execution code.
+                order = self.get_order(fill_id)
+                if order is None:
+                    continue
+                try:
+                    self._execute_limit_fill(
+                        order, fill_price, fill_qty=fill_qty,
+                    )
+                    all_fills.append((fill_id, fill_qty, fill_price))
+                    total_matched += fill_qty
+                    last_price = fill_price
+                except OrderNoLongerPending:
+                    continue
+        return AuctionMatch(
+            equilibrium_price=last_price,
+            matched_volume=total_matched,
+            fills=all_fills,
+        )
+
     # ── New order types: STOP / STOP_LIMIT / BRACKET ──────────────────
 
     def _queue_stop_order(
@@ -1755,6 +1986,58 @@ class IndiaPaperBroker(BrokerInterface):
                 payload={"parent": parent, "siblings_cancelled": cur.rowcount},
             )
 
+    def _rebalance_bracket_sibling_qty(
+        self,
+        conn: sqlite3.Connection,
+        filling_child: Order,
+        filled_qty_so_far: float,
+    ) -> None:
+        """Shrink the OCO sibling's outstanding qty to match this child's
+        progress.
+
+        When a bracket child partial-fills, the sibling no longer needs
+        to cover the just-closed shares — real OCO semantics shrink the
+        sibling so total exposure across siblings = remaining parent
+        position.
+
+        Specifically, the sibling's ``qty`` becomes the parent's filled
+        qty minus this child's filled qty so far. Once this child has
+        fully filled, the sibling's qty would hit zero — but the
+        ``qty > 0`` CHECK constraint refuses that, and zero qty has no
+        meaning anyway. The terminal-fill path cancels the sibling
+        outright, so we just no-op when the new qty drops to zero.
+        """
+        parent_id = filling_child.parent_order_id
+        if parent_id is None:
+            return
+        parent_row = conn.execute(
+            "SELECT filled_qty FROM orders "
+            "WHERE id = ? AND account_id = ?",
+            (parent_id, self.account_id),
+        ).fetchone()
+        if parent_row is None:
+            return
+        parent_filled = float(parent_row["filled_qty"])
+        new_sibling_qty = parent_filled - filled_qty_so_far
+        if new_sibling_qty <= 0:
+            # Sibling's outstanding exposure is gone; the terminal-fill
+            # path will cancel it, or it's already cancelled.
+            return
+        # Update the sibling. Only touch siblings that are still working
+        # AND whose current qty is greater than the new target (we never
+        # grow a sibling).
+        conn.execute(
+            "UPDATE orders SET qty = ? "
+            "WHERE account_id = ? AND parent_order_id = ? AND id != ? "
+            "AND status IN (?, ?) AND qty > ?",
+            (
+                new_sibling_qty,
+                self.account_id, parent_id, filling_child.id,
+                OrderStatus.PENDING.value, OrderStatus.PARTIALLY_FILLED.value,
+                new_sibling_qty,
+            ),
+        )
+
     def _trigger_stop_order(self, order: Order, last_price: float) -> None:
         """Convert a triggered STOP into a market or limit fill.
 
@@ -1953,9 +2236,16 @@ class IndiaPaperBroker(BrokerInterface):
                 qty_before=position_existed_before,
                 qty_after=position_qty_after,
             )
-            # Bracket OCO: when a child fills, cancel the sibling.
-            if terminal and order.parent_order_id is not None:
-                self._cancel_bracket_siblings(conn, order)
+            # Bracket OCO: when ANY slice of a child fills, rebalance
+            # the sibling's outstanding qty so total exposure matches
+            # the remaining parent position. On terminal fills, cancel
+            # the sibling outright.
+            if order.parent_order_id is not None:
+                self._rebalance_bracket_sibling_qty(
+                    conn, order, new_filled_qty,
+                )
+                if terminal:
+                    self._cancel_bracket_siblings(conn, order)
             if terminal:
                 self._emit_event(
                     conn,
@@ -2246,6 +2536,11 @@ class IndiaPaperBroker(BrokerInterface):
 
         Call this from a session-close hook (e.g. a cron at 15:30 IST,
         or just before the next session open). Returns the count expired.
+
+        ``GTT`` (Good-Till-Triggered) and ``AMO`` orders are deliberately
+        spared — GTT survives across sessions until manually cancelled or
+        triggered, and AMOs are still queueing for the *next* open at the
+        moment this runs.
 
         Race-safe: only flips rows currently in PENDING.
         """
@@ -2572,6 +2867,269 @@ class IndiaPaperBroker(BrokerInterface):
             "SPLIT %s %d:%d applied to %s: %g → %g shares (avg ₹%.4f → ₹%.4f)",
             symbol, ratio_num, ratio_den, self.account_id,
             old_qty, new_qty, old_avg, new_avg,
+        )
+        return action_id
+
+    def apply_bonus(
+        self,
+        symbol: str,
+        ratio_num: int,
+        ratio_den: int = 1,
+        ex_date: str | None = None,
+        notes: str | None = None,
+    ) -> str:
+        """Apply a bonus issue to the broker's holding.
+
+        Bonus issue economics: holders receive ``ratio_num`` extra shares
+        per ``ratio_den`` held. A 1:1 bonus doubles holdings (you get one
+        new share for each one you own). A 1:2 bonus gives one new share
+        for every two — total holding becomes 1.5x.
+
+        Mathematically equivalent to a ``(num + den) : den`` split:
+        new_qty = old_qty * (num + den) / den, with avg_cost adjusted to
+        preserve total cost basis. We record this with
+        ``action_type='bonus'`` so the audit trail stays distinct from
+        a true split.
+
+        Parameters
+        ----------
+        symbol:
+            The bonus-issuing symbol.
+        ratio_num, ratio_den:
+            Bonus entitlement: ``num`` new shares per ``den`` held.
+            Both must be positive integers.
+        ex_date:
+            ISO date string. Defaults to today (IST).
+        notes:
+            Optional free-text annotation.
+
+        Returns the action id. Idempotency is *not* enforced — calling
+        twice applies the bonus twice. Wrap in your own dedup if needed.
+        """
+        from fractions import Fraction
+
+        if ratio_num <= 0 or ratio_den <= 0:
+            raise ValueError("ratio components must be positive integers")
+        bonus_ratio = Fraction(ratio_num, ratio_den)
+        # Split-equivalent: shares grow by (num + den) / den.
+        split_equiv = Fraction(ratio_num + ratio_den, ratio_den)
+        ex_date = ex_date or self._clock.now().date().isoformat()
+        now = self._now_iso()
+
+        with self.persistence.transaction() as conn:
+            action_id = _corporate_actions.record_bonus(
+                conn,
+                symbol=symbol,
+                exchange=self.default_exchange.value,
+                ratio=bonus_ratio,
+                ex_date=ex_date,
+                applied_at_iso=now,
+                notes=notes,
+            )
+            existing = conn.execute(
+                "SELECT qty, avg_cost FROM positions "
+                "WHERE account_id = ? AND symbol = ?",
+                (self.account_id, symbol),
+            ).fetchone()
+            if existing is None:
+                logger.info(
+                    "BONUS %s %d:%d recorded; no holding to adjust",
+                    symbol, ratio_num, ratio_den,
+                )
+                return action_id
+
+            old_qty = existing["qty"]
+            old_avg = existing["avg_cost"]
+            new_qty = old_qty * float(split_equiv)
+            new_avg = old_avg / float(split_equiv)
+            conn.execute(
+                "UPDATE positions SET qty = ?, avg_cost = ? "
+                "WHERE account_id = ? AND symbol = ?",
+                (new_qty, new_avg, self.account_id, symbol),
+            )
+            self._emit_event(
+                conn,
+                event_type="corporate_action",
+                payload={
+                    "type": "bonus",
+                    "symbol": symbol,
+                    "ratio_num": ratio_num,
+                    "ratio_den": ratio_den,
+                    "ex_date": ex_date,
+                    "old_qty": old_qty,
+                    "new_qty": new_qty,
+                },
+            )
+
+        self._drain_pending_events()
+        logger.info(
+            "BONUS %s %d:%d applied to %s: %g → %g shares (avg ₹%.4f → ₹%.4f)",
+            symbol, ratio_num, ratio_den, self.account_id,
+            old_qty, new_qty, old_avg, new_avg,
+        )
+        return action_id
+
+    def apply_rights(
+        self,
+        symbol: str,
+        ratio_num: int,
+        ratio_den: int,
+        subscription_price: float,
+        subscribe: bool = False,
+        ex_date: str | None = None,
+        notes: str | None = None,
+    ) -> str:
+        """Record a rights issue and optionally subscribe.
+
+        Rights issue mechanics: holders receive a *right* (not an
+        obligation) to buy ``ratio_num`` new shares per ``ratio_den``
+        held, at ``subscription_price`` per share — typically below
+        market. The user must opt in by passing ``subscribe=True``;
+        otherwise the rights lapse (no position change, no cash debit).
+
+        When ``subscribe=True``:
+        - ``new_shares = floor(qty_held * ratio_num / ratio_den)``
+        - Cash is debited by ``new_shares * subscription_price``.
+        - Position grows: new ``qty = old_qty + new_shares``,
+          ``avg_cost`` recomputed so total basis = old basis +
+          subscription cost (preserves the round-trip P&L invariant).
+        - Insufficient cash raises :class:`InsufficientFundsError`.
+
+        Returns the action id whether or not the user subscribes.
+        Idempotency is *not* enforced — call once per rights event.
+        """
+        if ratio_num <= 0 or ratio_den <= 0:
+            raise ValueError("ratio components must be positive integers")
+        if subscription_price <= 0:
+            raise ValueError("subscription_price must be positive")
+        from fractions import Fraction
+        rights_ratio = Fraction(ratio_num, ratio_den)
+        ex_date = ex_date or self._clock.now().date().isoformat()
+        now = self._now_iso()
+
+        with self.persistence.transaction() as conn:
+            action_id = _corporate_actions.record_rights(
+                conn,
+                symbol=symbol,
+                exchange=self.default_exchange.value,
+                ratio=rights_ratio,
+                subscription_price=subscription_price,
+                ex_date=ex_date,
+                applied_at_iso=now,
+                notes=notes,
+            )
+            existing = conn.execute(
+                "SELECT qty, avg_cost FROM positions "
+                "WHERE account_id = ? AND symbol = ?",
+                (self.account_id, symbol),
+            ).fetchone()
+
+            if not subscribe or existing is None:
+                logger.info(
+                    "RIGHTS %s %d:%d recorded; subscribe=%s, holding=%s",
+                    symbol, ratio_num, ratio_den, subscribe,
+                    "none" if existing is None else f"{existing['qty']:g}",
+                )
+                self._emit_event(
+                    conn,
+                    event_type="corporate_action",
+                    payload={
+                        "type": "rights",
+                        "symbol": symbol,
+                        "ratio_num": ratio_num,
+                        "ratio_den": ratio_den,
+                        "subscription_price": subscription_price,
+                        "subscribed": False,
+                        "ex_date": ex_date,
+                    },
+                )
+                self._drain_pending_events()
+                return action_id
+
+            # Subscribe path: integer-floor the entitlement, charge cash,
+            # add shares.
+            old_qty = existing["qty"]
+            old_avg = existing["avg_cost"]
+            new_shares = int(old_qty * ratio_num // ratio_den)
+            if new_shares <= 0:
+                logger.info(
+                    "RIGHTS %s %d:%d subscribe=True but entitlement rounded to zero",
+                    symbol, ratio_num, ratio_den,
+                )
+                self._emit_event(
+                    conn,
+                    event_type="corporate_action",
+                    payload={
+                        "type": "rights",
+                        "symbol": symbol,
+                        "ratio_num": ratio_num,
+                        "ratio_den": ratio_den,
+                        "subscription_price": subscription_price,
+                        "subscribed": True,
+                        "new_shares": 0,
+                        "ex_date": ex_date,
+                    },
+                )
+                self._drain_pending_events()
+                return action_id
+
+            cost = new_shares * subscription_price
+            cash = conn.execute(
+                "SELECT cash FROM account WHERE account_id = ?",
+                (self.account_id,),
+            ).fetchone()["cash"]
+            if cost > cash:
+                raise InsufficientFundsError(
+                    f"Rights subscription needs ₹{cost:,.2f}, have ₹{cash:,.2f}",
+                )
+
+            conn.execute(
+                "UPDATE account SET cash = cash - ? WHERE account_id = ?",
+                (cost, self.account_id),
+            )
+            _ledger.record(
+                conn,
+                account_id=self.account_id,
+                amount=-cost,
+                reason="adjustment",
+                recorded_at_iso=now,
+                symbol=symbol,
+                notes=(
+                    f"Rights subscription: {new_shares} sh × "
+                    f"₹{subscription_price:.2f}"
+                ),
+            )
+
+            new_qty = old_qty + new_shares
+            new_basis = old_qty * old_avg + cost
+            new_avg = new_basis / new_qty
+            conn.execute(
+                "UPDATE positions SET qty = ?, avg_cost = ? "
+                "WHERE account_id = ? AND symbol = ?",
+                (new_qty, new_avg, self.account_id, symbol),
+            )
+            self._emit_event(
+                conn,
+                event_type="corporate_action",
+                payload={
+                    "type": "rights",
+                    "symbol": symbol,
+                    "ratio_num": ratio_num,
+                    "ratio_den": ratio_den,
+                    "subscription_price": subscription_price,
+                    "subscribed": True,
+                    "new_shares": new_shares,
+                    "cost": cost,
+                    "ex_date": ex_date,
+                },
+            )
+
+        self._drain_pending_events()
+        logger.info(
+            "RIGHTS %s %d:%d subscribed: +%d sh @ ₹%.2f (₹%.2f total) "
+            "-> %g sh avg ₹%.4f",
+            symbol, ratio_num, ratio_den, new_shares, subscription_price,
+            cost, new_qty, new_avg,
         )
         return action_id
 

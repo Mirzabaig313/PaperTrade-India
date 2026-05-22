@@ -1,29 +1,35 @@
-"""Corporate actions: stock splits, bonus issues, cash dividends.
+"""Corporate actions: stock splits, bonus issues, rights issues, dividends.
 
-Two methods on the broker — ``apply_split`` and ``apply_dividend`` —
-each writes a row in ``corporate_actions`` and atomically updates the
-relevant position(s) and account cash. Bonus issues are a degenerate
-split (e.g. 1:1 bonus = 2:1 split).
+Five methods on the broker — ``apply_split``, ``apply_bonus``,
+``apply_rights``, ``apply_dividend`` — each writes a row in
+``corporate_actions`` and atomically updates the relevant position(s)
+and account cash.
 
 What we model
 -------------
-- **Splits / bonuses**: multiply ``qty`` by ``ratio.numerator/denominator``,
+- **Splits**: multiply ``qty`` by ``ratio.numerator/denominator``,
   divide ``avg_cost`` by the same ratio. No cash impact. The position's
   total cost basis (``qty * avg_cost``) is preserved, just spread over
   more / fewer shares.
-- **Cash dividends**: credit ``per_share * qty`` to the holder's cash on
-  the ex-date. Tax is *not* withheld in the simulator — Indian dividend
-  TDS is recipient-specific and beyond scope.
+- **Bonus issues**: same arithmetic as a split, but recorded with
+  ``action_type='bonus'`` so the audit trail stays distinct. A 1:1
+  bonus = 2:1 split-equivalent.
+- **Rights issues**: existing shareholders may subscribe to new shares
+  at a fixed ``subscription_price`` per the entitlement ratio. The
+  user opts in or lets the rights lapse — no automatic dilution.
+- **Cash dividends**: credit ``per_share * qty`` to the holder's cash
+  on the ex-date. Tax is *not* withheld in the simulator — Indian
+  dividend TDS is recipient-specific and beyond scope.
 
 What we don't model
 -------------------
-- **Rights issues** (need a subscription decision per holder).
 - **Demergers / spin-offs** (need a target-symbol mapping).
 - **Special dividends with cash + shares**.
 - **Mergers / acquisitions** (price discovery and ratio mapping).
 
-Anyone who needs these can use ``broker.reset()`` to manually adjust
-positions around the ex-date.
+Schema-wise, ``action_type`` accepts 'split', 'dividend', 'bonus',
+'rights', plus 'merger' and 'spinoff' as forward-compatible
+placeholders (no broker methods yet).
 """
 
 from __future__ import annotations
@@ -39,16 +45,23 @@ CREATE TABLE IF NOT EXISTS corporate_actions (
     id TEXT PRIMARY KEY,
     symbol TEXT NOT NULL,
     exchange TEXT NOT NULL,
-    -- 'split' covers stock splits and bonus issues; 'dividend' is a
-    -- cash dividend. Future: 'rights', 'merger', 'spinoff'.
-    action_type TEXT NOT NULL CHECK(action_type IN ('split', 'dividend')),
-    -- For splits: numerator / denominator. New qty = old qty * num / den;
-    --             new avg_cost = old avg_cost * den / num. So 2:1 split
-    --             is num=2 den=1 (qty doubles, avg_cost halves).
+    -- 'split': stock split / reverse split.
+    -- 'bonus': bonus issue (degenerate split with its own audit trail).
+    -- 'rights': rights issue (entitlement ratio + subscription_price).
+    -- 'dividend': cash dividend.
+    -- 'merger', 'spinoff' reserved for future use.
+    action_type TEXT NOT NULL CHECK(action_type IN (
+        'split', 'dividend', 'bonus', 'rights', 'merger', 'spinoff'
+    )),
+    -- For splits / bonuses: numerator / denominator. Splits multiply
+    -- qty by num/den; bonuses give num new shares per den held.
+    -- For rights: entitlement ratio (num new shares per den held).
     -- For dividends: leave NULL; use ``amount_per_share``.
     ratio_num INTEGER,
     ratio_den INTEGER,
-    -- For dividends only.
+    -- For dividends: ₹ / share credit.
+    -- For rights: ₹ / share subscription price.
+    -- Otherwise NULL.
     amount_per_share REAL,
     ex_date TEXT NOT NULL,
     notes TEXT,

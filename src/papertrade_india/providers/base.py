@@ -72,6 +72,13 @@ class MarketQuote:
         Day's OHL + previous close (for percent-change displays).
     volume:
         Traded shares so far today.
+    adjusted_close:
+        Split- and dividend-adjusted close. Set by providers that can
+        deliver an adjusted history (yfinance ``auto_adjust=True``,
+        Alpha Vantage ``TIME_SERIES_DAILY_ADJUSTED``). ``None`` when
+        the source only delivers raw closes. Backtesters should prefer
+        ``adjusted_close`` when present so historical splits don't
+        cause spurious P&L jumps.
     currency:
         ISO code, defaults to INR for the Indian market.
     source:
@@ -92,6 +99,7 @@ class MarketQuote:
     low: float | None = None
     prev_close: float | None = None
     volume: int | None = None
+    adjusted_close: float | None = None
     currency: str = "INR"
     source: str = "unknown"
     is_real_time: bool = False

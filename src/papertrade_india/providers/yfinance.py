@@ -36,10 +36,21 @@ class YFinanceProvider(MarketDataProvider):
     ----------
     exchange_suffix:
         ``"NS"`` for NSE (default), ``"BO"`` for BSE.
+    auto_adjust:
+        When True (default), ``MarketQuote.adjusted_close`` and the
+        history bars are returned with split/dividend adjustments
+        applied — the standard backtesting choice. When False, raw
+        prices are returned (matching what a real broker contract
+        note shows on a non-ex-date day).
     """
 
-    def __init__(self, exchange_suffix: str = "NS") -> None:
+    def __init__(
+        self,
+        exchange_suffix: str = "NS",
+        auto_adjust: bool = True,
+    ) -> None:
         self.suffix = exchange_suffix.lstrip(".")
+        self.auto_adjust = auto_adjust
 
     @property
     def info(self) -> ProviderInfo:
@@ -103,7 +114,7 @@ class YFinanceProvider(MarketDataProvider):
 
             if last is None:
                 # Fall back to the daily history slot.
-                hist = ticker.history(period="1d")
+                hist = ticker.history(period="1d", auto_adjust=self.auto_adjust)
                 if hist is not None and not hist.empty:
                     last = float(hist["Close"].iloc[-1])
                     if "Volume" in hist.columns:
@@ -123,6 +134,10 @@ class YFinanceProvider(MarketDataProvider):
                 low=day_low,
                 prev_close=prev_close,
                 volume=volume,
+                # When auto_adjust is on, last == adjusted close.
+                # Otherwise it's the raw print and adjusted_close is
+                # not available from this code path.
+                adjusted_close=float(last) if self.auto_adjust else None,
                 source="yfinance",
                 is_real_time=False,  # Yahoo is delayed
             )
@@ -144,7 +159,10 @@ class YFinanceProvider(MarketDataProvider):
 
         try:
             ticker = yf.Ticker(f"{symbol}.{self.suffix}")
-            hist = ticker.history(start=str(start), end=str(end), interval=interval)
+            hist = ticker.history(
+                start=str(start), end=str(end), interval=interval,
+                auto_adjust=self.auto_adjust,
+            )
         except Exception as e:  # noqa: BLE001
             raise ProviderError(f"yfinance history failed: {e}") from e
         if hist is None or hist.empty:

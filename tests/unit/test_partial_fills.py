@@ -36,9 +36,15 @@ def test_both_caps_take_the_smaller():
 
 
 def test_min_fill_qty_floors():
-    """When the would-be slice is below min_fill_qty, return 0 (skip)."""
+    """When ``min_fill_qty > the computed cap``, ``min_fill_qty`` wins
+    so the order makes forward progress instead of stalling forever
+    on a cap that rounds below the floor."""
     cfg = PartialFillConfig(enabled=True, max_per_tick=2, min_fill_qty=5)
-    assert cfg.fill_qty(100) == 0
+    # Cap rounds to 2 (max_per_tick), which is below min_fill_qty=5.
+    # The floor wins → fill 5 (or remaining, whichever is smaller).
+    assert cfg.fill_qty(100) == 5
+    # When remaining is even less than min_fill_qty, fill it all.
+    assert cfg.fill_qty(3) == 3
 
 
 def test_below_min_fill_when_remaining_small():

@@ -55,15 +55,18 @@ from papertrade_india.providers import (
 
 class StubProvider(MarketDataProvider):
     def __init__(self) -> None:
+        # Approximate Indian large-cap prices as of mid-2026. These are
+        # demo numbers — the real simulator pulls live prices from the
+        # provider chain (yfinance / nse-bhavcopy / stooq / ...).
         self.last = {
-            "RELIANCE": 2500.0,
-            "TCS": 4000.0,
-            "INFY": 1800.0,
+            "RELIANCE": 1358.00,
+            "TCS": 4150.00,
+            "INFY": 1820.00,
         }
         self.prev = {
-            "RELIANCE": 2500.0,
-            "TCS": 4000.0,
-            "INFY": 1800.0,
+            "RELIANCE": 1349.30,
+            "TCS": 4100.00,
+            "INFY": 1810.00,
         }
 
     @property
@@ -136,9 +139,9 @@ def main() -> int:
     except LotSizeViolation as e:
         print(f"  → rejected: {e}")
 
-    print("\nTrying RELIANCE limit at ₹2900 (above 10% band of 2500)…")
+    print("\nTrying RELIANCE limit at ₹1600 (above 10% band of 1349)…")
     try:
-        broker.buy("RELIANCE", 1, order_type=OrderType.LIMIT, limit_price=2900)
+        broker.buy("RELIANCE", 1, order_type=OrderType.LIMIT, limit_price=1600)
     except PriceBandViolation as e:
         print(f"  → rejected: {e}")
 
@@ -148,17 +151,17 @@ def main() -> int:
     # T+1 is on by default now, so use INTRADAY product type for the
     # same-day buy/sell pattern this demo wants to show.
     broker.buy("RELIANCE", 10, product_type=ProductType.INTRADAY)
-    print("Bought 10 RELIANCE @ ₹2500 (INTRADAY)")
+    print("Bought 10 RELIANCE @ ₹1358 (INTRADAY)")
 
     sl = broker.sell(
         "RELIANCE", 10,
         order_type=OrderType.STOP_MARKET,
-        stop_price=2400.00,
+        stop_price=1340.00,
         product_type=ProductType.INTRADAY,
     )
-    print(f"Placed SELL STOP @ ₹2400 (id={sl.id}) — currently {sl.status.value}")
-    provider.set("RELIANCE", 2399.0)
-    print("Price falls to ₹2399 — running watcher tick…")
+    print(f"Placed SELL STOP @ ₹1340 (id={sl.id}) — currently {sl.status.value}")
+    provider.set("RELIANCE", 1339.0)
+    print("Price falls to ₹1339 — running watcher tick…")
     from papertrade_india import LimitOrderWatcher
     # Disable auto-square-off in this demo so the watcher doesn't close
     # the intraday position before the stop fires (this script may be
@@ -168,21 +171,25 @@ def main() -> int:
     print(f"  → stop {sl_after.status.value} @ ₹{sl_after.filled_avg_price:.2f}")
 
     # Bracket
-    print("\nPlacing bracket: BUY 5 RELIANCE entry market, SL=2380, TGT=2420")
-    provider.set("RELIANCE", 2400.0)
+    print("\nPlacing bracket: BUY 5 RELIANCE entry market, SL=1340, TGT=1380")
+    provider.set("RELIANCE", 1360.0)
     parent = broker.buy(
         "RELIANCE", 5,
         order_type=OrderType.BRACKET,
-        stop_price=2380.00,
-        target_price=2420.00,
+        stop_price=1340.00,
+        target_price=1380.00,
         product_type=ProductType.INTRADAY,
     )
     children = [o for o in broker.get_orders(limit=10) if o.parent_order_id == parent.id]
     print(f"  → parent {parent.status.value}, {len(children)} children pending")
 
-    print("Price rallies to ₹2421 — target should fill, stop should cancel…")
-    provider.set("RELIANCE", 2421.0)
-    LimitOrderWatcher(broker, auto_square_off_intraday=False).tick()
+    print("Price rallies to ₹1381 — target should fill, stop should cancel…")
+    provider.set("RELIANCE", 1381.0)
+    # Partial fills are on by default (~25% per tick). Drain the
+    # bracket over several watcher ticks so the OCO completes.
+    watcher = LimitOrderWatcher(broker, auto_square_off_intraday=False)
+    for _ in range(10):
+        watcher.tick()
     children = [o for o in broker.get_orders(limit=10) if o.parent_order_id == parent.id]
     for c in children:
         print(f"  → child {c.order_type.value}: {c.status.value}")
@@ -243,7 +250,7 @@ def main() -> int:
     # ── 5. Mark-to-bid + order book impact ──────────────────────────
     header("5. Mark-to-bid + synthetic order-book impact")
     # Reset the price stub so this section starts clean.
-    provider.set("RELIANCE", 2500.0)
+    provider.set("RELIANCE", 1358.0)
     realistic = IndiaPaperBroker(
         initial_capital=20_000_000,  # large enough for the 5000-share demo
         db_path="data/realism_demo_book.db",
@@ -288,7 +295,7 @@ def main() -> int:
     StubProvider.get_quote = provider_volume_was  # restore
     print(
         f"Bought 5000 RELIANCE @ VWAP ₹{big.filled_avg_price:.2f} "
-        f"(touch ask ~₹{2500.0 * 1.0005:.2f}, book walked deeper)",
+        f"(touch ask ~₹{1358.0 * 1.0005:.2f}, book walked deeper)",
     )
 
     return 0

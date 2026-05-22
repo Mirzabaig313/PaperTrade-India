@@ -18,11 +18,14 @@ Configuration
 - ``max_per_tick``: absolute share cap per watcher tick. ``None`` = no cap.
 - ``max_pct_per_tick``: cap as a fraction of the order's qty. e.g. 0.25 =
   fill ~25% per tick. ``None`` = no cap.
-- ``min_fill_qty``: don't bother filling slivers smaller than this. The
-  order stays PENDING until enough has accumulated.
+- ``min_fill_qty``: smallest slice we'll fill. Acts as a floor: the
+  effective per-tick cap is ``max(computed_cap, min_fill_qty)``, so
+  the order always makes forward progress instead of stalling on a
+  cap that rounds below the floor.
 
-The effective cap for any tick is ``min(max_per_tick, qty * max_pct_per_tick)``,
-floored by ``min_fill_qty``.
+The effective cap per tick is roughly
+``min(max_per_tick, qty * max_pct_per_tick)``, lifted to at least
+``min_fill_qty`` so we never return zero when there's still work to do.
 
 Market orders
 -------------
@@ -55,6 +58,13 @@ class PartialFillConfig:
         ``remaining_qty <= min_fill_qty``, we fill ``remaining_qty``
         in a single shot. Otherwise small orders (or the last sliver
         of a large order) would never fill.
+
+        When the percentage cap rounds below ``min_fill_qty``, we lift
+        the cap *up* to ``min_fill_qty`` rather than truncating to 0 —
+        otherwise a 5-share order with 25% cap and ``min_fill_qty=1``
+        would stall after filling 2 shares (remaining 3 × 0.25 = 0.75,
+        floors to 0). The whole point of ``min_fill_qty`` is to
+        guarantee forward progress.
         """
         if not self.enabled or remaining_qty <= 0:
             return remaining_qty  # disabled = full fill (legacy)
@@ -73,9 +83,10 @@ class PartialFillConfig:
         # except for fractional MF units which are out of scope here).
         cap = math.floor(min(candidates))
 
+        # Guarantee forward progress: a cap that rounds below
+        # ``min_fill_qty`` is lifted up to it. The earlier "remaining
+        # <= min_fill_qty" shortcut handles the small-order case, so
+        # by here we know remaining > min_fill_qty and lifting is safe.
         if cap < self.min_fill_qty:
-            # Slice would be smaller than the configured slug — wait for
-            # the next tick. This avoids 100 1-share fills with their
-            # 100x DP charges and 100x ledger rows.
-            return 0.0
+            cap = min(self.min_fill_qty, int(remaining_qty))
         return float(cap)

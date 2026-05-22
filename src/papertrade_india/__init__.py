@@ -30,6 +30,7 @@ from .corporate_actions import CorporateAction
 from .events import Event
 from .exceptions import (
     AccountNotFoundError,
+    AMOWindowClosedError,
     IdempotencyConflict,
     IndiaPaperBrokerError,
     InsufficientFundsError,
@@ -37,6 +38,7 @@ from .exceptions import (
     InvalidOrderError,
     KillSwitchActive,
     LotSizeViolation,
+    MarginNotSupported,
     MarketClosedError,
     OrderNoLongerPending,
     PriceBandViolation,
@@ -70,10 +72,12 @@ from .models import (
     OrderType,
     Position,
     ProductType,
+    TimeInForce,
     Trade,
 )
 from .observability import BrokerEvent, EventBus, stdlib_log_subscriber
 from .partial_fills import PartialFillConfig
+from .preopen import AuctionMatch, compute_equilibrium
 from .price_feed import (
     CachedLastKnownProvider,
     JugaadDataProvider,
@@ -132,6 +136,7 @@ __all__ = [
     "OrderType",
     "ProductType",
     "SessionPhase",
+    "TimeInForce",
     # Fees
     "FeeBreakdown",
     "FeeConfig",
@@ -201,6 +206,9 @@ __all__ = [
     "RejectionConfig",
     "RejectionSimulator",
     "RejectScenario",
+    # Tier-5: pre-open auction
+    "AuctionMatch",
+    "compute_equilibrium",
     # Exceptions
     "IndiaPaperBrokerError",
     "InsufficientFundsError",
@@ -221,6 +229,8 @@ __all__ = [
     "PriceBandViolation",
     "SettlementError",
     "RandomBrokerRejection",
+    "MarginNotSupported",
+    "AMOWindowClosedError",
 ]
 
 __version__ = "0.1.0.dev0"
