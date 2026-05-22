@@ -18,12 +18,27 @@ from typing import Literal
 
 
 class OrderType(str, Enum):
-    """Order type. ``MARKET`` fills instantly at last known price;
-    ``LIMIT`` is queued and filled by ``LimitOrderWatcher`` when the
-    market crosses the limit price."""
+    """Order type.
+
+    - ``MARKET``: fills instantly at last known price (slippage-adjusted).
+    - ``LIMIT``: queued, fills when the market crosses the limit price.
+    - ``STOP_MARKET``: queued, fires a market order once the stop price
+      is touched (BUY: when last >= stop; SELL: when last <= stop).
+      Used for stop-losses on long positions and breakout entries.
+    - ``STOP_LIMIT``: queued, fires a *limit* order once the stop price
+      is touched. Avoids the "stop hits and slips through bad price"
+      failure mode at the cost of possibly not filling at all.
+    - ``BRACKET``: parent order (entry as MARKET or LIMIT) plus child
+      stop-loss + child target. Children auto-cancel each other on
+      fill (OCO — One-Cancels-Other) and auto-cancel if the parent is
+      cancelled before fill.
+    """
 
     MARKET = "market"
     LIMIT = "limit"
+    STOP_MARKET = "stop_market"
+    STOP_LIMIT = "stop_limit"
+    BRACKET = "bracket"
 
 
 class OrderSide(str, Enum):
@@ -58,6 +73,25 @@ class Exchange(str, Enum):
     BSE = "BSE"
 
 
+class ProductType(str, Enum):
+    """Indian retail product type, in the Zerodha/Upstox parlance.
+
+    - ``DELIVERY`` (CNC at Zerodha, D at Upstox): T+1 settlement, no
+      auto-square-off, attracts STT on delivery rates and DP charges.
+      The default for most strategies.
+    - ``INTRADAY`` (MIS): same-session round-trip, no DP charge, broker
+      auto-squares-off any open MIS positions at 15:15 IST. Modeled
+      via :class:`papertrade_india.SettlementEngine`.
+
+    Out of scope for this simulator: NRML (overnight derivatives),
+    BO/CO (cover/bracket as separate product flags — we model bracket
+    as an order type instead), MTF (margin trading).
+    """
+
+    DELIVERY = "delivery"
+    INTRADAY = "intraday"
+
+
 Currency = Literal["INR", "USD"]
 
 
@@ -79,6 +113,10 @@ class Position:
     # broker fell back to ``avg_cost``. Lets agents distinguish a real
     # break-even position from a stale-valuation one.
     current_price_stale: bool = False
+    # Mark-to-market basis. ``"last"`` is the historical default;
+    # ``"bid"`` (long) / ``"ask"`` (short) is what real brokers use to
+    # compute exit P&L. Set to ``"mid"`` when only mid is available.
+    mark_basis: str = "last"
 
 
 @dataclass(frozen=True)
@@ -103,6 +141,12 @@ class Order:
     cancelled_at: datetime | None = None
     expired_at: datetime | None = None
     rejection_reason: str | None = None
+    # Stop / Bracket extensions (default ``None`` for plain MARKET/LIMIT).
+    stop_price: float | None = None        # STOP_MARKET / STOP_LIMIT
+    target_price: float | None = None      # BRACKET take-profit leg
+    parent_order_id: str | None = None     # BRACKET child → parent linkage
+    product_type: ProductType = ProductType.DELIVERY
+    triggered_at: datetime | None = None   # When a STOP transitioned PENDING → working
 
 
 @dataclass(frozen=True)

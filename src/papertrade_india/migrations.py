@@ -101,6 +101,121 @@ def _v1_initial_schema(conn: sqlite3.Connection) -> None:
         conn.execute(stmt)
 
 
+# ── Migration 002: microstructure + settlement + new order columns ──
+
+
+@migration(2)
+def _v2_realism_extensions(conn: sqlite3.Connection) -> None:
+    """Add the columns and tables needed for tick/lot/band rules,
+    T+1 settlement, and the new order types (STOP, BRACKET, INTRADAY).
+
+    Strategy
+    --------
+    Every change is additive at the data level — no rows lose meaning:
+
+    - ``symbols.tick_size`` / ``daily_band_pct``: NULL means "use
+      MicrostructureConfig defaults". Existing rows stay valid.
+    - ``orders``: rebuilt to widen the ``order_type`` CHECK and add
+      ``stop_price`` / ``target_price`` / ``parent_order_id`` /
+      ``triggered_at`` / ``product_type``. Rebuild is necessary because
+      SQLite can't ``ALTER TABLE ... DROP/REPLACE CONSTRAINT``. We use
+      the canonical 12-step rebuild: create new, copy, drop, rename.
+    - ``pending_settlements``: brand-new table, empty initially.
+
+    Rebuild safety
+    --------------
+    Foreign keys are deferred during the rebuild via
+    ``PRAGMA defer_foreign_keys=1`` so the in-flight rename doesn't
+    blow up cross-table FK references (``trades.order_id``,
+    ``cash_movements.order_id``, etc.). FK enforcement is restored at
+    the end. The whole thing runs inside the migration transaction so
+    a crash mid-rebuild rolls back cleanly.
+    """
+    # --- symbols: tick + band (additive) -------------------------------------
+    conn.execute("ALTER TABLE symbols ADD COLUMN tick_size REAL")
+    conn.execute("ALTER TABLE symbols ADD COLUMN daily_band_pct REAL")
+
+    # --- orders: rebuild with widened CHECK + new columns -------------------
+    conn.execute("PRAGMA defer_foreign_keys=ON")
+
+    conn.execute(
+        """
+        CREATE TABLE orders_new (
+            id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            exchange TEXT NOT NULL,
+            side TEXT NOT NULL CHECK(side IN ('buy','sell')),
+            qty REAL NOT NULL CHECK(qty > 0),
+            order_type TEXT NOT NULL CHECK(order_type IN (
+                'market','limit','stop_market','stop_limit','bracket'
+            )),
+            status TEXT NOT NULL CHECK(status IN (
+                'pending','filled','partially_filled',
+                'cancelled','rejected','expired'
+            )),
+            filled_qty REAL NOT NULL DEFAULT 0,
+            filled_avg_price REAL,
+            limit_price REAL,
+            fees_paid REAL NOT NULL DEFAULT 0,
+            realized_pl REAL NOT NULL DEFAULT 0,
+            time_in_force TEXT NOT NULL DEFAULT 'DAY',
+            created_at TEXT NOT NULL,
+            filled_at TEXT,
+            cancelled_at TEXT,
+            expired_at TEXT,
+            rejection_reason TEXT,
+            stop_price REAL,
+            target_price REAL,
+            parent_order_id TEXT,
+            triggered_at TEXT,
+            product_type TEXT NOT NULL DEFAULT 'delivery'
+                CHECK(product_type IN ('delivery','intraday')),
+            FOREIGN KEY (account_id) REFERENCES account(account_id)
+                ON DELETE CASCADE
+        )
+        """,
+    )
+    conn.execute(
+        """
+        INSERT INTO orders_new (
+            id, account_id, symbol, exchange, side, qty, order_type, status,
+            filled_qty, filled_avg_price, limit_price, fees_paid, realized_pl,
+            time_in_force, created_at, filled_at, cancelled_at, expired_at,
+            rejection_reason
+        )
+        SELECT
+            id, account_id, symbol, exchange, side, qty, order_type, status,
+            filled_qty, filled_avg_price, limit_price, fees_paid, realized_pl,
+            time_in_force, created_at, filled_at, cancelled_at, expired_at,
+            rejection_reason
+        FROM orders
+        """,
+    )
+    conn.execute("DROP TABLE orders")
+    conn.execute("ALTER TABLE orders_new RENAME TO orders")
+
+    # Recreate the v1 indexes (rebuild dropped them with the table).
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_orders_account_status "
+        "ON orders(account_id, status)",
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_orders_account_created "
+        "ON orders(account_id, created_at DESC)",
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_orders_parent "
+        "ON orders(parent_order_id)",
+    )
+
+    # --- pending settlements (new table) -------------------------------------
+    for stmt in _split_statements(_SETTLEMENT_SCHEMA_SQL):
+        conn.execute(stmt)
+
+    # FK enforcement restored automatically at COMMIT.
+
+
 # ── Public API ─────────────────────────────────────────────────────────
 
 
@@ -136,11 +251,18 @@ def run_migrations(conn: sqlite3.Connection) -> list[int]:
     _ensure_version_table(conn)
 
     # Legacy detection: tables exist but no version row. Stamp at v1.
+    # If the legacy DB happens to be missing tables that v1 introduced
+    # (truly old fragments, or the ``_synthesize_legacy_v1`` test
+    # fixture which only seeds the detector keys), run v1's idempotent
+    # body to fill the gaps before stamping. v1's DDL is all
+    # ``CREATE TABLE IF NOT EXISTS``, so re-running is safe.
     if applied_version(conn) == 0 and _looks_like_legacy_v1(conn):
         logger.info(
             "Detected legacy v0.1.x database (tables present, no schema_version "
-            "row). Stamping as schema_version=1.",
+            "row). Backfilling missing v1 tables and stamping as schema_version=1.",
         )
+        for stmt in _split_statements(_INITIAL_SCHEMA_SQL):
+            conn.execute(stmt)
         _stamp_version(conn, 1)
 
     applied = applied_version(conn)
@@ -390,4 +512,28 @@ CREATE INDEX IF NOT EXISTS idx_events_type_recorded
 
 CREATE INDEX IF NOT EXISTS idx_events_order
     ON events(order_id);
+"""
+
+
+# ── v2 schema additions ──────────────────────────────────────────────
+
+
+_SETTLEMENT_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS pending_settlements (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL CHECK(side IN ('buy','sell')),
+    qty REAL NOT NULL,
+    cash_delta REAL NOT NULL DEFAULT 0,
+    trade_date TEXT NOT NULL,
+    settle_on TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending','settled','cancelled')),
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_settlements_due
+    ON pending_settlements(account_id, status, settle_on);
 """

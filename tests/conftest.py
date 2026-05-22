@@ -62,12 +62,54 @@ def price_feed(stub_provider):
 
 @pytest.fixture
 def broker(tmp_path, price_feed):
-    """A fresh broker with no market-hours enforcement (for unit tests)."""
-    from papertrade_india import IndiaPaperBroker
+    """A fresh broker with realism layers disabled (for legacy tests).
+
+    Most pre-realism tests check exact fill prices, exact cash deltas,
+    and same-day buy/sell round-trips. Those assertions only hold when
+    the order-book sim, latency, rejection, and T+1 settlement layers
+    are off. We provide that "minimal" broker here.
+
+    Tests that exercise the realism layer construct their own
+    ``IndiaPaperBroker`` directly (see ``tests/integration/test_realism*.py``).
+    """
+    from papertrade_india import (
+        IndiaPaperBroker,
+        LatencyConfig,
+        OrderBookConfig,
+        RejectionConfig,
+        SettlementConfig,
+        SettlementMode,
+    )
 
     return IndiaPaperBroker(
         initial_capital=1_000_000.0,
         db_path=tmp_path / "broker.db",
+        account_id="test",
+        price_feed=price_feed,
+        enforce_market_hours=False,
+        # Override the realism defaults — legacy tests expect
+        # instant fills, exact prices, same-day round-trips.
+        order_book_config=OrderBookConfig(enabled=False),
+        settlement_config=SettlementConfig(mode=SettlementMode.T_PLUS_0),
+        latency_config=LatencyConfig(submit_ms_mean=0.0),
+        rejection_config=RejectionConfig(rate=0.0),
+        mark_to_bid=False,
+    )
+
+
+@pytest.fixture
+def realistic_broker(tmp_path, price_feed):
+    """A broker with every realism feature on (the default).
+
+    Use this in tests that want to exercise the realism layer with the
+    default configuration — tick/lot/band, T+1, mark-to-bid, latency,
+    rejections, synthetic book all active.
+    """
+    from papertrade_india import IndiaPaperBroker
+
+    return IndiaPaperBroker(
+        initial_capital=1_000_000.0,
+        db_path=tmp_path / "realistic.db",
         account_id="test",
         price_feed=price_feed,
         enforce_market_hours=False,

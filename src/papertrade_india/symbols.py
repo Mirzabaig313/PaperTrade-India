@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS symbols (
     lot_size INTEGER NOT NULL DEFAULT 1 CHECK(lot_size >= 1),
     delisted_at TEXT,
     added_at TEXT NOT NULL,
+    tick_size REAL,
+    daily_band_pct REAL,
     PRIMARY KEY (symbol, exchange)
 );
 
@@ -53,6 +55,10 @@ class SymbolEntry:
     isin: str | None
     lot_size: int
     delisted_at: datetime | None
+    # Microstructure metadata. ``None`` = "use MicrostructureConfig
+    # defaults" (broker-wide ₹0.05 tick, ±20% band by default).
+    tick_size: float | None = None
+    daily_band_pct: float | None = None
 
 
 class SymbolMaster:
@@ -75,7 +81,8 @@ class SymbolMaster:
         exchange: Exchange,
     ) -> SymbolEntry | None:
         row = conn.execute(
-            "SELECT symbol, exchange, name, isin, lot_size, delisted_at "
+            "SELECT symbol, exchange, name, isin, lot_size, delisted_at, "
+            "tick_size, daily_band_pct "
             "FROM symbols WHERE symbol = ? AND exchange = ?",
             (symbol, exchange.value),
         ).fetchone()
@@ -91,6 +98,8 @@ class SymbolMaster:
                 datetime.fromisoformat(row["delisted_at"])
                 if row["delisted_at"] else None
             ),
+            tick_size=row["tick_size"],
+            daily_band_pct=row["daily_band_pct"],
         )
 
     def list_all(
@@ -100,12 +109,14 @@ class SymbolMaster:
     ) -> list[SymbolEntry]:
         if include_delisted:
             rows = conn.execute(
-                "SELECT symbol, exchange, name, isin, lot_size, delisted_at "
+                "SELECT symbol, exchange, name, isin, lot_size, delisted_at, "
+                "tick_size, daily_band_pct "
                 "FROM symbols ORDER BY exchange, symbol"
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT symbol, exchange, name, isin, lot_size, delisted_at "
+                "SELECT symbol, exchange, name, isin, lot_size, delisted_at, "
+                "tick_size, daily_band_pct "
                 "FROM symbols WHERE delisted_at IS NULL "
                 "ORDER BY exchange, symbol"
             ).fetchall()
@@ -120,6 +131,8 @@ class SymbolMaster:
                     datetime.fromisoformat(r["delisted_at"])
                     if r["delisted_at"] else None
                 ),
+                tick_size=r["tick_size"],
+                daily_band_pct=r["daily_band_pct"],
             )
             for r in rows
         ]
@@ -134,17 +147,29 @@ class SymbolMaster:
         name: str | None = None,
         isin: str | None = None,
         lot_size: int = 1,
+        tick_size: float | None = None,
+        daily_band_pct: float | None = None,
     ) -> None:
-        """Insert or update a symbol. Clears any delisted_at flag."""
+        """Insert or update a symbol. Clears any delisted_at flag.
+
+        ``tick_size`` and ``daily_band_pct`` may be ``None`` — that's
+        the signal to fall back to the broker's
+        :class:`MicrostructureConfig` defaults at validate time.
+        """
         now = datetime.now(IST).isoformat()
         conn.execute(
             "INSERT INTO symbols (symbol, exchange, name, isin, "
-            "lot_size, delisted_at, added_at) "
-            "VALUES (?, ?, ?, ?, ?, NULL, ?) "
+            "lot_size, delisted_at, added_at, tick_size, daily_band_pct) "
+            "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?) "
             "ON CONFLICT(symbol, exchange) DO UPDATE SET "
             "name = excluded.name, isin = excluded.isin, "
-            "lot_size = excluded.lot_size, delisted_at = NULL",
-            (symbol, exchange.value, name, isin, lot_size, now),
+            "lot_size = excluded.lot_size, delisted_at = NULL, "
+            "tick_size = excluded.tick_size, "
+            "daily_band_pct = excluded.daily_band_pct",
+            (
+                symbol, exchange.value, name, isin, lot_size, now,
+                tick_size, daily_band_pct,
+            ),
         )
 
     def delist(
@@ -183,9 +208,11 @@ class SymbolMaster:
         csv_path: Path,
         exchange: Exchange,
     ) -> int:
-        """Bulk-upsert from a CSV with columns: symbol[, name, isin, lot_size].
+        """Bulk-upsert from a CSV with columns:
+        ``symbol[, name, isin, lot_size, tick_size, daily_band_pct]``.
 
-        Returns the count of rows upserted.
+        Returns the count of rows upserted. Missing columns fall back
+        to defaults (lot=1, tick/band=NULL → broker config).
         """
         n = 0
         with open(csv_path, newline="") as f:
@@ -205,6 +232,10 @@ class SymbolMaster:
                     name=(row.get("name") or "").strip() or None,
                     isin=(row.get("isin") or "").strip() or None,
                     lot_size=int(row.get("lot_size") or 1),
+                    tick_size=_parse_optional_float(row.get("tick_size")),
+                    daily_band_pct=_parse_optional_float(
+                        row.get("daily_band_pct"),
+                    ),
                 )
                 n += 1
         return n
@@ -233,3 +264,16 @@ class SymbolMaster:
                 f"Symbol {symbol!r} on {exchange.value} was delisted at "
                 f"{entry.delisted_at.isoformat()}"
             )
+
+
+def _parse_optional_float(s: str | None) -> float | None:
+    """Parse an optional float column from a CSV row; treat blanks as None."""
+    if s is None:
+        return None
+    s = s.strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None

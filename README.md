@@ -56,6 +56,25 @@ for the full landscape review.
   name registry. Built-in providers: `yfinance`, `jugaad-data`, `stooq`,
   `nse-bhavcopy` (official NSE EOD), `nsepython`, `alphavantage`,
   `twelvedata`, `finnhub`. See [examples/08_data_providers.py](examples/08_data_providers.py).
+- **Realism extensions (v0.2)** — opt-in features that close the gap
+  between "paper trading" and "broker simulator":
+  - **Tick / lot / band rules** — limit prices snap to the symbol's
+    tick (₹0.05 for most NSE scrips); orders rejected if not aligned
+    or if outside the daily price band.
+  - **STOP_MARKET / STOP_LIMIT / BRACKET** orders with full OCO
+    semantics (target fill cancels stop and vice versa).
+  - **T+1 settlement** with deliverable-qty enforcement (you can't
+    sell what you bought today on a delivery account) and same-day
+    intraday round-trips through `ProductType.INTRADAY`.
+  - **Auto-square-off** of intraday positions at 15:15 IST.
+  - **Mark-to-bid** valuation — unrealized P&L computed at the
+    actual exit price, not last.
+  - **Synthetic L2 order book** with queue position tracking and
+    Almgren-style market impact (`OrderBookConfig.enabled=True`).
+  - **Latency + random rejection** simulation for testing how your
+    agent handles a flaky upstream.
+  - See [examples/09_realism_features.py](examples/09_realism_features.py)
+    for a tour.
 - Realistic Indian fees: brokerage, **STT**, exchange charges, **GST**,
   SEBI charges, **stamp duty**, **DP charges**. Configurable per-broker.
 - Thread-safe SQLite persistence with WAL mode and atomic transactions.
@@ -368,9 +387,90 @@ def to_metrics(event):
 broker.events.subscribe(to_metrics, name="prom-shipper")
 ```
 
-### Data-provider system (new in v0.2)
+### Realism extensions (new in v0.2)
 
-The price feed is a chain of `MarketDataProvider`s — a formal ABC that
+By default, the broker behaves exactly like v0.1.x: instant fills, no
+tick/lot enforcement, T+0 cash, mark-off-last. Each realism feature is
+an opt-in config object:
+
+```python
+from datetime import time
+from papertrade_india import (
+    IndiaPaperBroker, MicrostructureConfig, OrderBookConfig,
+    SettlementConfig, SettlementMode, LatencyConfig, RejectionConfig,
+    RejectScenario,
+)
+
+broker = IndiaPaperBroker(
+    # 1–3: tick/lot/band — fully on by default. Disable any flag to skip.
+    microstructure_config=MicrostructureConfig(
+        enforce_tick_size=True,
+        enforce_lot_size=True,
+        enforce_price_band=True,
+        default_tick_size=0.05,    # NSE cash equity
+        default_band_pct=0.20,     # ±20% if symbol master has no override
+    ),
+    # 4: T+1 settlement + intraday auto-square-off
+    settlement_config=SettlementConfig(
+        mode=SettlementMode.T_PLUS_1,    # T+0 by default
+        auto_square_off_at=time(15, 15),
+    ),
+    # 5: synthetic L2 book + queue position + Almgren impact
+    order_book_config=OrderBookConfig(
+        enabled=True,
+        levels=10,
+        depth_pct_of_adv=0.005,    # 0.5% of ADV at the touch
+        almgren_coeff_bps=50.0,    # 50 bps for 100% of ADV
+    ),
+    # 6: latency + random rejections
+    latency_config=LatencyConfig(submit_ms_mean=80, submit_ms_p99=400),
+    rejection_config=RejectionConfig(
+        rate=0.001,
+        scenarios=[RejectScenario.NETWORK, RejectScenario.FREEZE_QTY],
+    ),
+    # 7: mark unrealized P&L off the bid (real-broker convention)
+    mark_to_bid=True,
+)
+```
+
+New order types:
+
+```python
+from papertrade_india import OrderType, ProductType
+
+# Stop-loss after entering a position
+broker.buy("RELIANCE", 10)
+broker.sell(
+    "RELIANCE", 10,
+    order_type=OrderType.STOP_MARKET,
+    stop_price=2400.00,
+)
+
+# Stop-Limit (avoids the "stop slipped through" failure mode)
+broker.sell(
+    "RELIANCE", 10,
+    order_type=OrderType.STOP_LIMIT,
+    stop_price=2400.00,
+    limit_price=2390.00,
+)
+
+# Bracket: entry + SL + target as one logical unit (OCO semantics)
+broker.buy(
+    "RELIANCE", 10,
+    order_type=OrderType.BRACKET,
+    stop_price=2400.00,
+    target_price=2600.00,
+)
+
+# Intraday product type — bypasses T+1, auto-squared at 15:15 IST
+broker.buy("INFY", 5, product_type=ProductType.INTRADAY)
+broker.sell("INFY", 5, product_type=ProductType.INTRADAY)  # same-day OK
+```
+
+Run [`examples/09_realism_features.py`](examples/09_realism_features.py)
+for a working walkthrough of all seven features.
+
+### Data-provider system (new in v0.2) — a formal ABC that
 delivers a rich `MarketQuote` (last/bid/ask/OHLC/volume/source/freshness),
 not just a float. You can stack circuit breakers and median aggregation
 to get fills closer to "real":

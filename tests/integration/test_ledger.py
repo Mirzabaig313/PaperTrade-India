@@ -11,7 +11,14 @@ from __future__ import annotations
 
 import pytest
 
-from papertrade_india import IndiaPaperBroker
+from papertrade_india import (
+    IndiaPaperBroker,
+    LatencyConfig,
+    OrderBookConfig,
+    RejectionConfig,
+    SettlementConfig,
+    SettlementMode,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -181,6 +188,15 @@ def test_invariant_under_random_ops(tmp_path, price_feed, stub_provider):
         account_id="ledger-fuzz",
         price_feed=price_feed,
         enforce_market_hours=False,
+        # Property fuzz tests do same-day round-trips of various sizes.
+        # Realism layers (T+1, book impact) would trip those without
+        # adding signal to the cash-invariant check we actually care
+        # about. Disable them here.
+        order_book_config=OrderBookConfig(enabled=False),
+        settlement_config=SettlementConfig(mode=SettlementMode.T_PLUS_0),
+        latency_config=LatencyConfig(submit_ms_mean=0.0),
+        rejection_config=RejectionConfig(rate=0.0),
+        mark_to_bid=False,
     )
 
     rng = random.Random(0xF00D)

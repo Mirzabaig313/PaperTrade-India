@@ -12,6 +12,35 @@ from papertrade_india import (
 )
 
 
+def _legacy_broker(tmp_path, price_feed, **kwargs):
+    """Construct a broker with realism layers off so we can isolate slippage.
+
+    The Tier-4 defaults (synthetic order book, T+1, mark-to-bid, latency,
+    rejection) all interact with fill prices. To exercise the slippage
+    model in isolation we disable them. Realism-aware tests live in
+    ``tests/integration/test_realism_*``.
+    """
+    from papertrade_india import (
+        IndiaPaperBroker,
+        LatencyConfig,
+        OrderBookConfig,
+        RejectionConfig,
+        SettlementConfig,
+        SettlementMode,
+    )
+
+    return IndiaPaperBroker(
+        price_feed=price_feed,
+        enforce_market_hours=False,
+        order_book_config=OrderBookConfig(enabled=False),
+        settlement_config=SettlementConfig(mode=SettlementMode.T_PLUS_0),
+        latency_config=LatencyConfig(submit_ms_mean=0.0),
+        rejection_config=RejectionConfig(rate=0.0),
+        mark_to_bid=False,
+        **kwargs,
+    )
+
+
 def test_zero_bps_is_identity():
     cfg = SlippageConfig(bps=0)
     for side in (OrderSide.BUY, OrderSide.SELL):
@@ -91,32 +120,26 @@ def test_negative_bps_clamped_to_zero():
 
 def test_broker_market_buy_pays_slippage(tmp_path, stub_provider, price_feed):
     """A market buy through the broker fills above last when bps > 0."""
-    from papertrade_india import IndiaPaperBroker
-
     stub_provider.set("RELIANCE", 1000.0)
-    broker = IndiaPaperBroker(
+    broker = _legacy_broker(
+        tmp_path, price_feed,
         initial_capital=1_000_000,
         db_path=tmp_path / "slip.db",
         account_id="slip",
-        price_feed=price_feed,
         slippage_config=SlippageConfig(bps=10),  # 0.10%
-        enforce_market_hours=False,
     )
     order = broker.buy("RELIANCE", 1)
     assert order.filled_avg_price == pytest.approx(1001.0)
 
 
 def test_broker_market_sell_receives_below(tmp_path, stub_provider, price_feed):
-    from papertrade_india import IndiaPaperBroker
-
     stub_provider.set("RELIANCE", 1000.0)
-    broker = IndiaPaperBroker(
+    broker = _legacy_broker(
+        tmp_path, price_feed,
         initial_capital=1_000_000,
         db_path=tmp_path / "slip.db",
         account_id="slip",
-        price_feed=price_feed,
         slippage_config=SlippageConfig(bps=10),
-        enforce_market_hours=False,
     )
     broker.buy("RELIANCE", 5)  # establish position (also at slipped price)
     sell = broker.sell("RELIANCE", 2)
@@ -127,15 +150,12 @@ def test_broker_market_sell_receives_below(tmp_path, stub_provider, price_feed):
 def test_default_broker_has_zero_slippage(tmp_path, stub_provider, price_feed):
     """A broker constructed without ``slippage_config`` matches legacy
     behavior: fill price == last price."""
-    from papertrade_india import IndiaPaperBroker
-
     stub_provider.set("RELIANCE", 2500.0)
-    broker = IndiaPaperBroker(
+    broker = _legacy_broker(
+        tmp_path, price_feed,
         initial_capital=1_000_000,
         db_path=tmp_path / "noslip.db",
         account_id="noslip",
-        price_feed=price_feed,
-        enforce_market_hours=False,
     )
     order = broker.buy("RELIANCE", 1)
     assert order.filled_avg_price == 2500.0
@@ -174,20 +194,17 @@ def test_bps_for_lookup():
 
 def test_broker_uses_per_symbol_bps(tmp_path, stub_provider, price_feed):
     """A broker configured with per-symbol slippage applies it on fills."""
-    from papertrade_india import IndiaPaperBroker
-
     stub_provider.set("HDFC", 1000)
     stub_provider.set("PENNY", 1000)
-    broker = IndiaPaperBroker(
+    broker = _legacy_broker(
+        tmp_path, price_feed,
         initial_capital=1_000_000,
         db_path=tmp_path / "psyms.db",
         account_id="psyms",
-        price_feed=price_feed,
         slippage_config=SlippageConfig(
             bps=10,
             per_symbol_bps={"PENNY": 100.0},  # 1% on illiquid
         ),
-        enforce_market_hours=False,
     )
     o_hdfc = broker.buy("HDFC", 1)
     o_penny = broker.buy("PENNY", 1)

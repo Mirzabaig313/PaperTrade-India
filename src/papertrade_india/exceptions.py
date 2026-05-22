@@ -106,3 +106,55 @@ class SymbolNotFound(IndiaPaperBrokerError):  # noqa: N818
 
 class SymbolDelisted(IndiaPaperBrokerError):  # noqa: N818
     """Symbol exists in the master but has been marked delisted."""
+
+
+# ── Microstructure rejections ────────────────────────────────────────
+
+
+class TickSizeViolation(RiskViolation):
+    """Limit/stop price isn't aligned to the symbol's tick size.
+
+    Real exchanges reject these outright. The simulator does the same
+    when ``EnforceMicrostructure(tick_size=True)`` is on (default).
+    """
+
+
+class LotSizeViolation(RiskViolation):
+    """Order qty isn't a multiple of the symbol's lot size.
+
+    For cash equities this is almost always 1 (single-share orders are
+    legal). It matters for F&O contracts (out of scope) and the rare
+    cash-equity that trades in lots (e.g., some delisted scrips).
+    """
+
+
+class PriceBandViolation(RiskViolation):
+    """Order would fill outside the symbol's daily price band.
+
+    NSE bands are ±5%/10%/20% off the previous day's close, set by
+    the exchange per scrip. Orders that would cross the band freeze
+    pending exchange action; here we reject pre-trade to keep the
+    simulator deterministic.
+    """
+
+
+# ── Settlement ───────────────────────────────────────────────────────
+
+
+class SettlementError(IndiaPaperBrokerError):
+    """Settlement bookkeeping failed (very rare — usually a bug)."""
+
+
+# ── Random simulated rejections ──────────────────────────────────────
+
+
+class RandomBrokerRejection(IndiaPaperBrokerError):  # noqa: N818
+    """Order was rejected by the simulated broker for a non-deterministic
+    reason (network, throttle, freeze qty, scrip suspended, …).
+
+    Only raised when :class:`papertrade_india.RejectionConfig` is enabled
+    on the broker. Lets agent tests exercise reject-handling code paths
+    without hitting a real broker. Naming: keeps ``raise
+    RandomBrokerRejection`` readable; the base already carries the
+    ``Error`` suffix.
+    """

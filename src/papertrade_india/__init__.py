@@ -36,19 +36,31 @@ from .exceptions import (
     InsufficientSharesError,
     InvalidOrderError,
     KillSwitchActive,
+    LotSizeViolation,
     MarketClosedError,
     OrderNoLongerPending,
+    PriceBandViolation,
     PriceUnavailableError,
+    RandomBrokerRejection,
     RiskViolation,
+    SettlementError,
     StalePriceRejected,
     SymbolDelisted,
     SymbolNotFound,
+    TickSizeViolation,
 )
 from .fees import FeeBreakdown, FeeConfig, FeeSchedule, IndianFeeEngine
 from .interface import BrokerInterface
 from .ledger import CashMovement
 from .limit_orders import LimitOrderWatcher
 from .market_hours import IST, NSECalendar, SessionPhase
+from .microstructure import (
+    MicrostructureConfig,
+    OrderBook,
+    OrderBookConfig,
+    OrderBookSimulator,
+    round_to_tick,
+)
 from .models import (
     Account,
     Exchange,
@@ -57,6 +69,7 @@ from .models import (
     OrderStatus,
     OrderType,
     Position,
+    ProductType,
     Trade,
 )
 from .observability import BrokerEvent, EventBus, stdlib_log_subscriber
@@ -87,6 +100,19 @@ from .providers import (
 )
 from .quickstart import quickstart
 from .risk import RiskConfig, RiskContext, RiskEngine
+from .settlement import (
+    PendingSettlement,
+    SettlementConfig,
+    SettlementEngine,
+    SettlementMode,
+)
+from .simulation import (
+    LatencyConfig,
+    LatencySimulator,
+    RejectionConfig,
+    RejectionSimulator,
+    RejectScenario,
+)
 from .slippage import SlippageConfig, apply_slippage
 from .symbols import SymbolEntry, SymbolMaster
 
@@ -104,6 +130,7 @@ __all__ = [
     "OrderSide",
     "OrderStatus",
     "OrderType",
+    "ProductType",
     "SessionPhase",
     # Fees
     "FeeBreakdown",
@@ -159,6 +186,21 @@ __all__ = [
     "WallClock",
     "ReplayClock",
     "quickstart",
+    # Tier-4: realism extensions
+    "MicrostructureConfig",
+    "OrderBookConfig",
+    "OrderBookSimulator",
+    "OrderBook",
+    "round_to_tick",
+    "SettlementConfig",
+    "SettlementEngine",
+    "SettlementMode",
+    "PendingSettlement",
+    "LatencyConfig",
+    "LatencySimulator",
+    "RejectionConfig",
+    "RejectionSimulator",
+    "RejectScenario",
     # Exceptions
     "IndiaPaperBrokerError",
     "InsufficientFundsError",
@@ -174,6 +216,11 @@ __all__ = [
     "IdempotencyConflict",
     "SymbolNotFound",
     "SymbolDelisted",
+    "TickSizeViolation",
+    "LotSizeViolation",
+    "PriceBandViolation",
+    "SettlementError",
+    "RandomBrokerRejection",
 ]
 
 __version__ = "0.1.0.dev0"

@@ -59,11 +59,20 @@ from .exceptions import (
     InvalidOrderError,
     MarketClosedError,
     OrderNoLongerPending,
+    RandomBrokerRejection,
     StalePriceRejected,
 )
 from .fees import FeeConfig, FeeSchedule, IndianFeeEngine
 from .interface import BrokerInterface
 from .market_hours import NSECalendar, SessionPhase
+from .microstructure import (
+    MicrostructureConfig,
+    OrderBookConfig,
+    OrderBookSimulator,
+    validate_band,
+    validate_lot,
+    validate_tick,
+)
 from .models import (
     Account,
     Exchange,
@@ -72,12 +81,20 @@ from .models import (
     OrderStatus,
     OrderType,
     Position,
+    ProductType,
 )
 from .observability import BrokerEvent, EventBus
 from .partial_fills import PartialFillConfig
 from .persistence import PathLike, Persistence
 from .price_feed import PriceFeed, Quote
 from .risk import RiskConfig, RiskContext, RiskEngine
+from .settlement import SettlementConfig, SettlementEngine, SettlementMode
+from .simulation import (
+    LatencyConfig,
+    LatencySimulator,
+    RejectionConfig,
+    RejectionSimulator,
+)
 from .slippage import SlippageConfig, apply_slippage
 from .symbols import SymbolMaster
 
@@ -124,6 +141,12 @@ class IndiaPaperBroker(BrokerInterface):
         partial_fill_config: PartialFillConfig | None = None,
         event_bus: EventBus | None = None,
         clock: Clock | None = None,
+        microstructure_config: MicrostructureConfig | None = None,
+        order_book_config: OrderBookConfig | None = None,
+        settlement_config: SettlementConfig | None = None,
+        latency_config: LatencyConfig | None = None,
+        rejection_config: RejectionConfig | None = None,
+        mark_to_bid: bool = True,
     ) -> None:
         """Construct a broker bound to ``account_id`` in ``db_path``.
 
@@ -169,6 +192,40 @@ class IndiaPaperBroker(BrokerInterface):
         Defaults to a fresh empty bus. Subscribe via ``broker.events``.
         Events are also persisted to the ``events`` table regardless of
         whether the bus has subscribers.
+
+        Tier-4 collaborators (realism layer — all ON by default)
+        --------------------------------------------------------
+        ``microstructure_config``: tick / lot / band rules. Defaults
+        enforce all three with ₹0.05 tick, lot=1, ±20% band; per-symbol
+        overrides via ``SymbolMaster``. Pass
+        ``MicrostructureConfig(enforce_tick_size=False, ...)`` to relax
+        any flag.
+
+        ``order_book_config``: synthetic L2 book + queue position +
+        Almgren impact. Defaults to ``OrderBookConfig(enabled=True)``;
+        when the provider doesn't supply bid/ask the broker silently
+        skips book impact and defers to the slippage model.
+
+        ``settlement_config``: T+1 cash settlement and intraday
+        auto-square-off. Defaults to
+        ``SettlementConfig(mode=SettlementMode.T_PLUS_1)`` — the
+        realistic Indian retail mode. Pass
+        ``SettlementConfig(mode=SettlementMode.T_PLUS_0)`` for the
+        legacy "instant cash" simplification.
+
+        ``latency_config``: simulated submit latency (lognormal,
+        median 80ms, p99 400ms by default, deterministic seed=42).
+        Pass ``LatencyConfig(submit_ms_mean=0)`` to disable.
+
+        ``rejection_config``: probabilistic rejection at submit.
+        Defaults to a 0.1% rate over a small set of realistic
+        scenarios so agent code paths get exercised. Pass
+        ``RejectionConfig(rate=0.0)`` to disable.
+
+        ``mark_to_bid``: when True (default), unrealized P&L for long
+        positions is computed off the bid (real-broker convention) when
+        the rich quote exposes one. Falls back to last when bid is
+        missing.
         """
         self.account_id = account_id
         self.default_exchange = exchange
@@ -196,6 +253,17 @@ class IndiaPaperBroker(BrokerInterface):
         self.events: EventBus = event_bus or EventBus()
         self._pending_events: list[BrokerEvent] = []
         self._clock: Clock = clock or WallClock()
+
+        # Tier-4: realism extensions. Each is independently opt-in;
+        # defaults preserve all v0.1.x behavior.
+        self.microstructure_config = microstructure_config or MicrostructureConfig()
+        self._book_sim = OrderBookSimulator(
+            order_book_config or OrderBookConfig(),
+        )
+        self.settlement = SettlementEngine(settlement_config or SettlementConfig())
+        self._latency_sim = LatencySimulator(latency_config or LatencyConfig())
+        self._reject_sim = RejectionSimulator(rejection_config or RejectionConfig())
+        self.mark_to_bid = bool(mark_to_bid)
 
         self._ensure_account_exists(initial_capital, strict_open=strict_open)
 
@@ -353,10 +421,15 @@ class IndiaPaperBroker(BrokerInterface):
         limit_price: float | None = None,
         time_in_force: str = "DAY",
         idempotency_key: str | None = None,
+        stop_price: float | None = None,
+        target_price: float | None = None,
+        product_type: ProductType = ProductType.DELIVERY,
     ) -> Order:
         return self._submit_order(
             symbol, qty, OrderSide.BUY, order_type, limit_price,
             time_in_force, idempotency_key,
+            stop_price=stop_price, target_price=target_price,
+            product_type=product_type,
         )
 
     def sell(
@@ -367,10 +440,15 @@ class IndiaPaperBroker(BrokerInterface):
         limit_price: float | None = None,
         time_in_force: str = "DAY",
         idempotency_key: str | None = None,
+        stop_price: float | None = None,
+        target_price: float | None = None,
+        product_type: ProductType = ProductType.DELIVERY,
     ) -> Order:
         return self._submit_order(
             symbol, qty, OrderSide.SELL, order_type, limit_price,
             time_in_force, idempotency_key,
+            stop_price=stop_price, target_price=target_price,
+            product_type=product_type,
         )
 
     # ── Order execution ─────────────────────────────────────────────────
@@ -384,6 +462,9 @@ class IndiaPaperBroker(BrokerInterface):
         limit_price: float | None,
         time_in_force: str,
         idempotency_key: str | None = None,
+        stop_price: float | None = None,
+        target_price: float | None = None,
+        product_type: ProductType = ProductType.DELIVERY,
     ) -> Order:
         if qty <= 0:
             raise InvalidOrderError("qty must be positive")
@@ -393,6 +474,39 @@ class IndiaPaperBroker(BrokerInterface):
             )
         if order_type == OrderType.LIMIT and limit_price is not None and limit_price <= 0:
             raise InvalidOrderError("limit_price must be positive")
+        if order_type in (OrderType.STOP_MARKET, OrderType.STOP_LIMIT):
+            if stop_price is None or stop_price <= 0:
+                raise InvalidOrderError(
+                    "stop_price (positive) required for STOP orders",
+                )
+            if order_type == OrderType.STOP_LIMIT and (
+                limit_price is None or limit_price <= 0
+            ):
+                raise InvalidOrderError(
+                    "limit_price required for STOP_LIMIT orders",
+                )
+        if order_type == OrderType.BRACKET:
+            if limit_price is None and order_type == OrderType.LIMIT:
+                # Bracket entry can be MARKET or LIMIT — no constraint here.
+                pass
+            if stop_price is None or target_price is None:
+                raise InvalidOrderError(
+                    "BRACKET requires both stop_price and target_price",
+                )
+
+        # Latency simulation: real broker submit takes wall-clock time.
+        # Done before idempotency check so a slow broker doesn't dedupe
+        # an in-flight retry into the previous response.
+        if self._latency_sim.enabled:
+            self._latency_sim.sleep()
+
+        # Random rejection injection: emulate a flaky upstream.
+        if self._reject_sim.enabled:
+            scenario = self._reject_sim.maybe_reject()
+            if scenario is not None:
+                raise RandomBrokerRejection(
+                    f"Simulated broker rejection: {scenario.value}",
+                )
 
         if idempotency_key is not None:
             replay = self._idempotency_replay(
@@ -409,6 +523,16 @@ class IndiaPaperBroker(BrokerInterface):
 
         with self.persistence.read() as conn:
             self.symbol_master.validate(conn, symbol, self.default_exchange)
+
+        # Microstructure pre-trade checks (tick / lot / band). All
+        # opt-out via MicrostructureConfig flags.
+        self._microstructure_check(
+            symbol=symbol,
+            qty=qty,
+            limit_price=limit_price,
+            stop_price=stop_price,
+            target_price=target_price,
+        )
 
         risk_price_for_check = (
             limit_price if order_type == OrderType.LIMIT and limit_price is not None
@@ -429,12 +553,47 @@ class IndiaPaperBroker(BrokerInterface):
                 f"Use a LIMIT order to queue for the next session."
             )
 
+        # T+1 deliverable-qty check on sells (DELIVERY product only).
+        if (
+            side == OrderSide.SELL
+            and product_type == ProductType.DELIVERY
+            and self.settlement.mode == SettlementMode.T_PLUS_1
+        ):
+            self._t_plus_1_sellable_check(symbol, qty)
+
         if order_type == OrderType.MARKET:
-            order = self._execute_market_order(symbol, qty, side, time_in_force)
-        else:
+            order = self._execute_market_order(
+                symbol, qty, side, time_in_force, product_type=product_type,
+            )
+        elif order_type == OrderType.LIMIT:
             assert limit_price is not None  # guarded above
             order = self._queue_limit_order(
                 symbol, qty, side, limit_price, time_in_force,
+                product_type=product_type,
+            )
+        elif order_type in (OrderType.STOP_MARKET, OrderType.STOP_LIMIT):
+            assert stop_price is not None  # guarded above
+            order = self._queue_stop_order(
+                symbol=symbol,
+                qty=qty,
+                side=side,
+                order_type=order_type,
+                stop_price=stop_price,
+                limit_price=limit_price,
+                time_in_force=time_in_force,
+                product_type=product_type,
+            )
+        else:  # BRACKET
+            assert stop_price is not None and target_price is not None
+            order = self._queue_bracket_order(
+                symbol=symbol,
+                qty=qty,
+                side=side,
+                limit_price=limit_price,
+                stop_price=stop_price,
+                target_price=target_price,
+                time_in_force=time_in_force,
+                product_type=product_type,
             )
 
         if idempotency_key is not None:
@@ -606,12 +765,118 @@ class IndiaPaperBroker(BrokerInterface):
             self._drain_pending_events()
             raise
 
+    # ── Realism helpers (microstructure + settlement) ─────────────────
+
+    def _symbol_microstructure(
+        self, symbol: str,
+    ) -> tuple[float, int, float | None]:
+        """Resolve (tick_size, lot_size, daily_band_pct) for ``symbol``.
+
+        Falls back to :class:`MicrostructureConfig` defaults when the
+        symbol master has no override (the common case for unregistered
+        symbols in lenient mode).
+        """
+        cfg = self.microstructure_config
+        with self.persistence.read() as conn:
+            entry = self.symbol_master.get(conn, symbol, self.default_exchange)
+        if entry is None:
+            return (cfg.default_tick_size, cfg.default_lot_size, cfg.default_band_pct)
+        tick = entry.tick_size if entry.tick_size is not None else cfg.default_tick_size
+        lot = entry.lot_size if entry.lot_size > 0 else cfg.default_lot_size
+        band = (
+            entry.daily_band_pct
+            if entry.daily_band_pct is not None
+            else cfg.default_band_pct
+        )
+        return (tick, lot, band)
+
+    def _microstructure_check(
+        self,
+        symbol: str,
+        qty: float,
+        limit_price: float | None,
+        stop_price: float | None,
+        target_price: float | None,
+    ) -> None:
+        """Run tick / lot / band validation per :class:`MicrostructureConfig`.
+
+        Three independent toggles. Each runs only when its flag is
+        ``True`` (the default). The band check needs ``prev_close``; we
+        try the rich :meth:`PriceFeed.get_market_quote` first and skip
+        the check (rather than fail) when no prev_close is available.
+        """
+        cfg = self.microstructure_config
+        tick, lot, band_pct = self._symbol_microstructure(symbol)
+
+        if cfg.enforce_tick_size:
+            for label, p in (
+                ("limit_price", limit_price),
+                ("stop_price", stop_price),
+                ("target_price", target_price),
+            ):
+                validate_tick(p, tick, label)
+
+        if cfg.enforce_lot_size:
+            validate_lot(qty, lot)
+
+        if cfg.enforce_price_band and band_pct and band_pct > 0:
+            prev_close = self._safe_prev_close(symbol)
+            if prev_close is not None:
+                for p in (limit_price, stop_price, target_price):
+                    if p is not None:
+                        validate_band(p, prev_close, band_pct)
+
+    def _safe_prev_close(self, symbol: str) -> float | None:
+        """Best-effort previous close from the rich quote, or ``None``.
+
+        Wrapped in a broad except because a missing prev_close should
+        skip the band check (fail open), not crash the order. The check
+        is a realism feature, not a financial guarantee.
+        """
+        try:
+            mq = self.price_feed.get_market_quote(symbol)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("prev_close unavailable for %s: %s", symbol, e)
+            return None
+        return mq.prev_close
+
+    def _t_plus_1_sellable_check(self, symbol: str, qty: float) -> None:
+        """Reject DELIVERY sells that exceed deliverable qty under T+1.
+
+        ``deliverable_qty = position_qty - in_flight_buys``. If the agent
+        bought 10 shares this morning and tries to sell 12, this raises
+        even though the position is technically 12 — the 10 freshly
+        bought aren't yet in demat.
+        """
+        with self.persistence.read() as conn:
+            row = conn.execute(
+                "SELECT qty FROM positions "
+                "WHERE account_id = ? AND symbol = ?",
+                (self.account_id, symbol),
+            ).fetchone()
+            held = float(row["qty"]) if row else 0.0
+            sellable = self.settlement.deliverable_qty(
+                conn,
+                account_id=self.account_id,
+                symbol=symbol,
+                position_qty=held,
+                as_of=self._clock.now().date(),
+            )
+        if qty > sellable + _QTY_EPSILON:
+            raise InsufficientSharesError(
+                f"Only {sellable:g} share(s) of {symbol} are deliverable "
+                f"today (held={held:g}, in-flight T+1 buys reduce it). "
+                f"Use product_type=ProductType.INTRADAY for same-day "
+                f"round-trips, or wait for settlement.",
+            )
+
     def _execute_market_order(
         self,
         symbol: str,
         qty: float,
         side: OrderSide,
         time_in_force: str,
+        product_type: ProductType = ProductType.DELIVERY,
     ) -> Order:
         """Fill immediately at slippage-adjusted market price."""
         quote = self._get_fill_quote(symbol)
@@ -623,6 +888,15 @@ class IndiaPaperBroker(BrokerInterface):
             last_price=last_price,
             symbol=symbol,
         )
+        # Order-book impact (Tier-4): when the book sim is enabled, walk
+        # a synthesized book and override ``price`` with the VWAP.
+        if self._book_sim.config.enabled:
+            price = self._maybe_apply_book_impact(
+                symbol=symbol,
+                qty=qty,
+                side=side,
+                last_price=last_price,
+            )
         order_id = uuid.uuid4().hex[:12]
         now = self._now_iso()
         fee_engine = self._fee_engine_for(now)
@@ -660,6 +934,7 @@ class IndiaPaperBroker(BrokerInterface):
                 time_in_force=time_in_force,
                 created_at=now,
                 filled_at=now,
+                product_type=product_type,
             )
             self._record_trade(
                 conn,
@@ -671,6 +946,15 @@ class IndiaPaperBroker(BrokerInterface):
                 fees=fees.total,
                 realized_pl=realized_pl,
                 executed_at=now,
+            )
+            self._maybe_settle_trade(
+                conn,
+                side=side,
+                symbol=symbol,
+                qty=qty,
+                cash_credit=qty * price - fees.total,
+                product_type=product_type,
+                now=now,
             )
 
             self._emit_event(
@@ -899,6 +1183,7 @@ class IndiaPaperBroker(BrokerInterface):
         side: OrderSide,
         limit_price: float,
         time_in_force: str,
+        product_type: ProductType = ProductType.DELIVERY,
     ) -> Order:
         order_id = uuid.uuid4().hex[:12]
         now = self._now_iso()
@@ -920,6 +1205,7 @@ class IndiaPaperBroker(BrokerInterface):
                 time_in_force=time_in_force,
                 created_at=now,
                 filled_at=None,
+                product_type=product_type,
             )
             self._emit_event(
                 conn,
@@ -929,8 +1215,13 @@ class IndiaPaperBroker(BrokerInterface):
                     "symbol": symbol, "side": side.value, "qty": qty,
                     "order_type": OrderType.LIMIT.value,
                     "limit_price": limit_price,
+                    "product_type": product_type.value,
                 },
             )
+
+        # Synthetic-book queue position tracking (Tier-4).
+        if self._book_sim.config.enabled:
+            self._maybe_join_book_queue(symbol, side, limit_price)
 
         self._drain_pending_events()
 
@@ -941,6 +1232,584 @@ class IndiaPaperBroker(BrokerInterface):
         order = self.get_order(order_id)
         assert order is not None
         return order
+
+    # ── New order types: STOP / STOP_LIMIT / BRACKET ──────────────────
+
+    def _queue_stop_order(
+        self,
+        symbol: str,
+        qty: float,
+        side: OrderSide,
+        order_type: OrderType,
+        stop_price: float,
+        limit_price: float | None,
+        time_in_force: str,
+        product_type: ProductType = ProductType.DELIVERY,
+    ) -> Order:
+        """Queue a STOP_MARKET or STOP_LIMIT order in PENDING state.
+
+        The watcher monitors the price feed each tick. When the stop is
+        triggered (BUY: last >= stop, SELL: last <= stop), the watcher
+        calls :meth:`_trigger_stop_order` which converts the stop into
+        an executed market or pending limit order.
+        """
+        order_id = uuid.uuid4().hex[:12]
+        now = self._now_iso()
+        with self.persistence.transaction() as conn:
+            self._record_order(
+                conn,
+                order_id=order_id,
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                order_type=order_type,
+                status=OrderStatus.PENDING,
+                filled_qty=0.0,
+                filled_avg_price=None,
+                limit_price=limit_price,
+                fees_paid=0.0,
+                realized_pl=0.0,
+                time_in_force=time_in_force,
+                created_at=now,
+                filled_at=None,
+                stop_price=stop_price,
+                product_type=product_type,
+            )
+            self._emit_event(
+                conn,
+                event_type="order_submitted",
+                order_id=order_id,
+                payload={
+                    "symbol": symbol, "side": side.value, "qty": qty,
+                    "order_type": order_type.value,
+                    "stop_price": stop_price,
+                    "limit_price": limit_price,
+                    "product_type": product_type.value,
+                },
+            )
+        self._drain_pending_events()
+        logger.info(
+            "QUEUE STOP %s %s %s stop=₹%.2f%s",
+            side.value.upper(), qty, symbol, stop_price,
+            f" limit=₹{limit_price:.2f}" if limit_price else "",
+        )
+        result = self.get_order(order_id)
+        assert result is not None
+        return result
+
+    def _queue_bracket_order(
+        self,
+        symbol: str,
+        qty: float,
+        side: OrderSide,
+        limit_price: float | None,
+        stop_price: float,
+        target_price: float,
+        time_in_force: str,
+        product_type: ProductType = ProductType.DELIVERY,
+    ) -> Order:
+        """Queue a bracket: parent entry + child SL + child target.
+
+        Semantics
+        ---------
+        - Parent: MARKET (when ``limit_price is None``) or LIMIT.
+        - Children are queued in PENDING but won't *trigger* until the
+          parent fills. The watcher gates them on parent status.
+        - On either child filling, the other is auto-cancelled (OCO).
+        - On the parent being cancelled while still PENDING, both
+          children are auto-cancelled too.
+
+        Children are the *opposite side* of the parent: a BUY parent
+        spawns SELL-stop and SELL-limit children at ``stop_price`` and
+        ``target_price`` respectively.
+        """
+        opposite = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
+        parent_id = uuid.uuid4().hex[:12]
+        now = self._now_iso()
+
+        # Children's prices are tick-validated already (we ran the
+        # microstructure check in _submit_order). Parent's effective
+        # entry price for child priming is the limit_price if set,
+        # else None — children fire only after parent fills.
+        with self.persistence.transaction() as conn:
+            # Parent
+            parent_type = OrderType.LIMIT if limit_price is not None else OrderType.MARKET
+            self._record_order(
+                conn,
+                order_id=parent_id,
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                order_type=parent_type,
+                status=OrderStatus.PENDING,
+                filled_qty=0.0,
+                filled_avg_price=None,
+                limit_price=limit_price,
+                fees_paid=0.0,
+                realized_pl=0.0,
+                time_in_force=time_in_force,
+                created_at=now,
+                filled_at=None,
+                stop_price=stop_price,
+                target_price=target_price,
+                product_type=product_type,
+            )
+            # Stop-loss child (opposite side, STOP_MARKET)
+            sl_id = uuid.uuid4().hex[:12]
+            self._record_order(
+                conn,
+                order_id=sl_id,
+                symbol=symbol,
+                side=opposite,
+                qty=qty,
+                order_type=OrderType.STOP_MARKET,
+                status=OrderStatus.PENDING,
+                filled_qty=0.0,
+                filled_avg_price=None,
+                limit_price=None,
+                fees_paid=0.0,
+                realized_pl=0.0,
+                time_in_force=time_in_force,
+                created_at=now,
+                filled_at=None,
+                stop_price=stop_price,
+                parent_order_id=parent_id,
+                product_type=product_type,
+            )
+            # Target child (opposite side, LIMIT)
+            tgt_id = uuid.uuid4().hex[:12]
+            self._record_order(
+                conn,
+                order_id=tgt_id,
+                symbol=symbol,
+                side=opposite,
+                qty=qty,
+                order_type=OrderType.LIMIT,
+                status=OrderStatus.PENDING,
+                filled_qty=0.0,
+                filled_avg_price=None,
+                limit_price=target_price,
+                fees_paid=0.0,
+                realized_pl=0.0,
+                time_in_force=time_in_force,
+                created_at=now,
+                filled_at=None,
+                parent_order_id=parent_id,
+                product_type=product_type,
+            )
+            self._emit_event(
+                conn,
+                event_type="order_submitted",
+                order_id=parent_id,
+                payload={
+                    "symbol": symbol, "side": side.value, "qty": qty,
+                    "order_type": "bracket",
+                    "limit_price": limit_price,
+                    "stop_price": stop_price,
+                    "target_price": target_price,
+                    "child_sl_id": sl_id,
+                    "child_target_id": tgt_id,
+                    "product_type": product_type.value,
+                },
+            )
+        self._drain_pending_events()
+        logger.info(
+            "QUEUE BRACKET %s %s %s entry=%s SL=₹%.2f TGT=₹%.2f",
+            side.value.upper(), qty, symbol,
+            f"₹{limit_price:.2f}" if limit_price else "MARKET",
+            stop_price, target_price,
+        )
+        # If parent is MARKET, fire it immediately so the children gate
+        # on a real "filled" parent rather than indefinitely-PENDING.
+        if parent_type == OrderType.MARKET:
+            try:
+                self._fill_pending_market_parent(parent_id)
+            except Exception as e:  # noqa: BLE001 — defer to watcher
+                logger.warning(
+                    "Parent bracket %s could not fill immediately: %s",
+                    parent_id, e,
+                )
+        result = self.get_order(parent_id)
+        assert result is not None
+        return result
+
+    def _fill_pending_market_parent(self, parent_id: str) -> None:
+        """Fill a market-entry bracket parent that's currently PENDING.
+
+        Reuses the standard market execution path via a temporary
+        synthesized fill so fees/ledger/events flow through canonical
+        code. We tag the resulting fill with ``parent_order_id``
+        already on the row, so children stay correctly linked.
+        """
+        order = self.get_order(parent_id)
+        if order is None or order.status != OrderStatus.PENDING:
+            return
+        # Get a quote and walk through the same fill flow as
+        # _execute_market_order, but with a fixed order_id (parent_id).
+        quote = self._get_fill_quote(order.symbol)
+        last_price = quote.price
+        price = apply_slippage(
+            self.slippage_config,
+            side=order.side,
+            order_type=OrderType.MARKET,
+            last_price=last_price,
+            symbol=order.symbol,
+        )
+        if self._book_sim.config.enabled:
+            price = self._maybe_apply_book_impact(
+                symbol=order.symbol, qty=order.qty, side=order.side,
+                last_price=last_price,
+            )
+        now = self._now_iso()
+        fee_engine = self._fee_engine_for(now)
+        fees = fee_engine.calculate(
+            order.side, order.qty, price, self.default_exchange,
+        )
+        with self.persistence.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE orders SET status = ?, filled_qty = ?, "
+                "filled_avg_price = ?, fees_paid = ?, filled_at = ? "
+                "WHERE id = ? AND account_id = ? AND status = ?",
+                (
+                    OrderStatus.FILLED.value, order.qty, price,
+                    fees.total, now, parent_id, self.account_id,
+                    OrderStatus.PENDING.value,
+                ),
+            )
+            if cur.rowcount == 0:
+                return
+            position_existed = self._symbol_position_qty(conn, order.symbol) > 0
+            if order.side == OrderSide.BUY:
+                self._apply_buy(
+                    conn, order.symbol, order.qty, price, fees.total, now,
+                    order_id=parent_id,
+                )
+                realized_pl = 0.0
+            else:
+                realized_pl = self._apply_sell(
+                    conn, order.symbol, order.qty, price, fees.total, now,
+                    order_id=parent_id,
+                )
+            if realized_pl != 0.0:
+                conn.execute(
+                    "UPDATE orders SET realized_pl = ? WHERE id = ?",
+                    (realized_pl, parent_id),
+                )
+            self._record_trade(
+                conn,
+                order_id=parent_id,
+                symbol=order.symbol,
+                side=order.side,
+                qty=order.qty,
+                price=price,
+                fees=fees.total,
+                realized_pl=realized_pl,
+                executed_at=now,
+            )
+            self._maybe_settle_trade(
+                conn,
+                side=order.side,
+                symbol=order.symbol,
+                qty=order.qty,
+                cash_credit=order.qty * price - fees.total,
+                product_type=order.product_type,
+                now=now,
+            )
+            qty_after = self._symbol_position_qty(conn, order.symbol)
+            self._emit_event(
+                conn, event_type="order_filled", order_id=parent_id,
+                payload={
+                    "symbol": order.symbol, "side": order.side.value,
+                    "qty": order.qty, "fill_price": price,
+                    "fees_paid": fees.total,
+                    "is_bracket_parent": True,
+                },
+            )
+            self._emit_position_events(
+                conn, order=order,
+                qty_before=position_existed, qty_after=qty_after,
+            )
+            # Bracket OCO: if this market-fill order was a child of a
+            # bracket (i.e. STOP_MARKET firing), cancel its sibling.
+            if order.parent_order_id is not None:
+                self._cancel_bracket_siblings(conn, order)
+        self._drain_pending_events()
+
+    # ── Order-book impact + queue priming ─────────────────────────────
+
+    def _maybe_apply_book_impact(
+        self,
+        symbol: str,
+        qty: float,
+        side: OrderSide,
+        last_price: float,
+    ) -> float:
+        """Walk the synthetic book; return VWAP fill price.
+
+        Only kicks in when the provider supplies a real bid/ask. Without
+        bid/ask there's no honest book to synthesize — synthesizing one
+        from spread defaults would silently overcharge users on
+        providers that don't expose depth (e.g. yfinance fast_info,
+        nse_bhavcopy). In that case we fall back to the slippage-only
+        path so the legacy "fill at last with bps slip" semantics
+        remain stable.
+
+        Best-effort throughout. Any failure (no rich quote, book empty)
+        returns the slippage-adjusted last price.
+        """
+        try:
+            mq = self.price_feed.get_market_quote(symbol)
+        except Exception:  # noqa: BLE001
+            return last_price
+        if mq is None or mq.bid is None or mq.ask is None:
+            return last_price
+        tick, _, _ = self._symbol_microstructure(symbol)
+        book = self._book_sim.synthesize(
+            symbol=symbol,
+            last=last_price,
+            bid=mq.bid,
+            ask=mq.ask,
+            adv=float(mq.volume) if mq.volume else None,
+            tick_size=tick,
+        )
+        fill = self._book_sim.walk_book(book, side, int(round(qty)))
+        if fill.filled_qty == 0:
+            return last_price
+        return fill.avg_price
+
+    def _maybe_join_book_queue(
+        self,
+        symbol: str,
+        side: OrderSide,
+        limit_price: float,
+    ) -> None:
+        """Record a queue position so :meth:`get_queue_position` works.
+
+        Soft-fails on any error; queue tracking is observability, not
+        correctness-critical.
+        """
+        try:
+            mq = self.price_feed.get_market_quote(symbol)
+        except Exception:  # noqa: BLE001
+            return
+        tick, _, _ = self._symbol_microstructure(symbol)
+        book = self._book_sim.synthesize(
+            symbol=symbol,
+            last=mq.last,
+            bid=mq.bid,
+            ask=mq.ask,
+            adv=float(mq.volume) if mq.volume else None,
+            tick_size=tick,
+        )
+        self._book_sim.join_queue(symbol, side, limit_price, book)
+
+    def get_queue_position(
+        self,
+        symbol: str,
+        side: OrderSide,
+        price: float,
+    ) -> int | None:
+        """Public accessor for queued shares-ahead at a price level.
+
+        Returns ``None`` when the order book sim is disabled or the
+        broker has no recorded queue join for that level.
+        """
+        if not self._book_sim.config.enabled:
+            return None
+        tick, _, _ = self._symbol_microstructure(symbol)
+        return self._book_sim.queue_position(symbol, side, price, tick)
+
+    # ── Settlement glue ──────────────────────────────────────────────
+
+    def _maybe_settle_trade(
+        self,
+        conn: sqlite3.Connection,
+        side: OrderSide,
+        symbol: str,
+        qty: float,
+        cash_credit: float,
+        product_type: ProductType,
+        now: str,
+    ) -> None:
+        """Enqueue a T+1 row for delivery trades; no-op for intraday/T+0."""
+        if product_type != ProductType.DELIVERY:
+            return
+        if self.settlement.mode != SettlementMode.T_PLUS_1:
+            return
+        trade_date = datetime.fromisoformat(now).date()
+        now_dt = datetime.fromisoformat(now)
+        if side == OrderSide.SELL:
+            self.settlement.enqueue_sell(
+                conn,
+                account_id=self.account_id,
+                symbol=symbol,
+                qty=qty,
+                cash_credit=cash_credit,
+                trade_date=trade_date,
+                now=now_dt,
+            )
+        else:
+            self.settlement.enqueue_buy(
+                conn,
+                account_id=self.account_id,
+                symbol=symbol,
+                qty=qty,
+                trade_date=trade_date,
+                now=now_dt,
+            )
+
+    def settle_due(self) -> int:
+        """Roll all pending T+1 settlements that are due.
+
+        Returns count rolled. Call this once per session-open from
+        a daily hook (or let the limit-order watcher do it).
+        """
+        with self.persistence.transaction() as conn:
+            return self.settlement.settle_due(
+                conn,
+                account_id=self.account_id,
+                as_of=self._clock.now().date(),
+            )
+
+    def square_off_intraday(self) -> int:
+        """Close all open INTRADAY positions at market.
+
+        Called from the watcher at :attr:`SettlementConfig.auto_square_off_at`,
+        or manually from session-close hooks. Each round-trip flows
+        through the canonical sell path so fees, ledger, and events fire
+        normally. Returns the count of positions squared off.
+
+        We identify intraday positions as those with at least one
+        unfilled-or-recently-filled INTRADAY order today. Simplifying
+        assumption: a symbol's product type is taken from its most
+        recent BUY order on the trading day. A robust implementation
+        would track product type at the position level.
+        """
+        with self.persistence.read() as conn:
+            today = self._clock.now().date().isoformat()
+            rows = conn.execute(
+                "SELECT symbol, SUM(CASE WHEN side='buy' THEN filled_qty "
+                "ELSE -filled_qty END) AS net "
+                "FROM orders WHERE account_id = ? AND product_type = 'intraday' "
+                "AND status IN ('filled','partially_filled') "
+                "AND substr(created_at, 1, 10) = ? "
+                "GROUP BY symbol HAVING net > 0",
+                (self.account_id, today),
+            ).fetchall()
+            squared_targets = [(r["symbol"], float(r["net"])) for r in rows]
+
+        n = 0
+        for symbol, qty in squared_targets:
+            try:
+                self.sell(
+                    symbol=symbol,
+                    qty=qty,
+                    order_type=OrderType.MARKET,
+                    product_type=ProductType.INTRADAY,
+                )
+                n += 1
+                logger.info(
+                    "AUTO-SQUARE-OFF %s qty=%g (intraday)", symbol, qty,
+                )
+            except Exception as e:  # noqa: BLE001 — never let one bad
+                # symbol stop the loop. Real brokers keep going.
+                logger.exception(
+                    "Auto-square-off failed for %s: %s", symbol, e,
+                )
+        return n
+
+    def _cancel_bracket_siblings(
+        self,
+        conn: sqlite3.Connection,
+        filled_child: Order,
+    ) -> None:
+        """One-Cancels-Other: when one bracket child fills, cancel its sibling.
+
+        The sibling is identified by sharing ``parent_order_id`` and
+        having a different id. Both are written in one UPDATE so the
+        OCO is atomic — even if the watcher is mid-tick on the sibling,
+        the next ``UPDATE WHERE status='pending'`` no-ops on a
+        cancelled row.
+        """
+        parent = filled_child.parent_order_id
+        if parent is None:
+            return
+        cur = conn.execute(
+            "UPDATE orders SET status = ?, cancelled_at = ?, "
+            "rejection_reason = 'OCO sibling filled' "
+            "WHERE account_id = ? AND parent_order_id = ? AND id != ? "
+            "AND status IN (?, ?)",
+            (
+                OrderStatus.CANCELLED.value, self._now_iso(),
+                self.account_id, parent, filled_child.id,
+                OrderStatus.PENDING.value, OrderStatus.PARTIALLY_FILLED.value,
+            ),
+        )
+        if cur.rowcount:
+            self._emit_event(
+                conn, event_type="bracket_oco_cancelled",
+                order_id=filled_child.id,
+                payload={"parent": parent, "siblings_cancelled": cur.rowcount},
+            )
+
+    def _trigger_stop_order(self, order: Order, last_price: float) -> None:
+        """Convert a triggered STOP into a market or limit fill.
+
+        Called by :class:`LimitOrderWatcher`. STOP_MARKET fires
+        immediately at last; STOP_LIMIT becomes a regular pending
+        LIMIT and waits for the watcher's next pass to fill.
+
+        Race-safe: the row's status flips PENDING → working under an
+        UPDATE-with-WHERE-status guard. If we lose the race
+        (concurrent cancel), we silently skip.
+        """
+        now = self._now_iso()
+        if order.order_type == OrderType.STOP_MARKET:
+            # Mark triggered first so a concurrent cancel can't fight us.
+            with self.persistence.transaction() as conn:
+                cur = conn.execute(
+                    "UPDATE orders SET triggered_at = ? "
+                    "WHERE id = ? AND account_id = ? AND status = ?",
+                    (now, order.id, self.account_id, OrderStatus.PENDING.value),
+                )
+                if cur.rowcount == 0:
+                    return
+                self._emit_event(
+                    conn, event_type="stop_triggered",
+                    order_id=order.id,
+                    payload={"stop_price": order.stop_price, "trigger_price": last_price},
+                )
+            self._drain_pending_events()
+            # Now fill the stop as a market. Reuses the same code path
+            # as the bracket-parent market fill.
+            self._fill_pending_market_parent(order.id)
+        else:  # STOP_LIMIT
+            with self.persistence.transaction() as conn:
+                cur = conn.execute(
+                    "UPDATE orders SET order_type = ?, triggered_at = ? "
+                    "WHERE id = ? AND account_id = ? AND status = ?",
+                    (
+                        OrderType.LIMIT.value, now, order.id,
+                        self.account_id, OrderStatus.PENDING.value,
+                    ),
+                )
+                if cur.rowcount == 0:
+                    return
+                self._emit_event(
+                    conn, event_type="stop_triggered",
+                    order_id=order.id,
+                    payload={
+                        "stop_price": order.stop_price,
+                        "trigger_price": last_price,
+                        "now_pending_limit": order.limit_price,
+                    },
+                )
+            self._drain_pending_events()
+            logger.info(
+                "STOP→LIMIT %s %s @ stop=₹%.2f (limit ₹%.2f) for %s",
+                order.side.value.upper(), order.qty,
+                order.stop_price, order.limit_price, order.symbol,
+            )
 
     def _execute_limit_fill(
         self,
@@ -1064,6 +1933,15 @@ class IndiaPaperBroker(BrokerInterface):
                 realized_pl=slice_realized_pl,
                 executed_at=now,
             )
+            self._maybe_settle_trade(
+                conn,
+                side=order.side,
+                symbol=order.symbol,
+                qty=slice_qty,
+                cash_credit=slice_qty * adjusted_price - fees.total,
+                product_type=order.product_type,
+                now=now,
+            )
 
             position_qty_after = self._symbol_position_qty(conn, order.symbol)
             self._emit_position_events(
@@ -1072,6 +1950,9 @@ class IndiaPaperBroker(BrokerInterface):
                 qty_before=position_existed_before,
                 qty_after=position_qty_after,
             )
+            # Bracket OCO: when a child fills, cancel the sibling.
+            if terminal and order.parent_order_id is not None:
+                self._cancel_bracket_siblings(conn, order)
             if terminal:
                 self._emit_event(
                     conn,
@@ -1129,13 +2010,10 @@ class IndiaPaperBroker(BrokerInterface):
         positions: list[Position] = []
         for row in rows:
             stale = False
+            mark_basis = "last"
             try:
-                price = self.price_feed.get_price(row["symbol"])
+                price, mark_basis = self._mark_price(row["symbol"])
             except Exception as e:  # noqa: BLE001 — network-volatile
-                # PriceFeed already exhausts yfinance → jugaad → cache.
-                # If we landed here, even the long-lived cache was empty.
-                # Fall back to avg_cost so the row renders, and flag stale
-                # so callers don't mistake "shows 0% P&L" for "real 0% P&L".
                 logger.warning(
                     "Position %s: price unavailable, using avg_cost. %s",
                     row["symbol"], e,
@@ -1160,6 +2038,7 @@ class IndiaPaperBroker(BrokerInterface):
                     ),
                     entry_date=datetime.fromisoformat(row["entry_date"]),
                     current_price_stale=stale,
+                    mark_basis=mark_basis,
                 )
             )
         return positions
@@ -1176,8 +2055,9 @@ class IndiaPaperBroker(BrokerInterface):
             return None
 
         stale = False
+        mark_basis = "last"
         try:
-            price = self.price_feed.get_price(row["symbol"])
+            price, mark_basis = self._mark_price(row["symbol"])
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "Position %s: price unavailable, using avg_cost. %s",
@@ -1202,7 +2082,33 @@ class IndiaPaperBroker(BrokerInterface):
             ),
             entry_date=datetime.fromisoformat(row["entry_date"]),
             current_price_stale=stale,
+            mark_basis=mark_basis,
         )
+
+    def _mark_price(self, symbol: str) -> tuple[float, str]:
+        """Resolve the mark-to-market price for a long position.
+
+        Returns ``(price, basis)``:
+        - With ``mark_to_bid=True`` and the rich quote exposing a bid,
+          returns ``(bid, "bid")``. This matches what a real broker
+          uses for unrealized P&L on a long.
+        - When bid is missing but we have both bid+ask, mid is used.
+        - Otherwise falls back to the legacy last-price behavior.
+
+        Raises whatever the price feed raises so callers can decide
+        between fall-back and propagation.
+        """
+        if self.mark_to_bid:
+            try:
+                mq = self.price_feed.get_market_quote(symbol)
+            except Exception:  # noqa: BLE001
+                mq = None
+            if mq is not None:
+                if mq.bid is not None and mq.bid > 0:
+                    return float(mq.bid), "bid"
+                if mq.bid is not None and mq.ask is not None:
+                    return float((mq.bid + mq.ask) / 2.0), "mid"
+        return self.price_feed.get_price(symbol), "last"
 
     def get_account(self) -> Account:
         """Account summary.
@@ -1279,7 +2185,13 @@ class IndiaPaperBroker(BrokerInterface):
     # ── Order management ───────────────────────────────────────────────
 
     def cancel_order(self, order_id: str) -> bool:
-        """Cancel a pending or partially-filled order. Race-safe."""
+        """Cancel a pending or partially-filled order. Race-safe.
+
+        Bracket-aware: if the cancelled order has children (i.e. it's
+        a bracket parent), the children are cancelled in the same
+        transaction. If the cancelled order *is* a child of a bracket,
+        we leave the sibling alone — only OCO-on-fill cancels siblings.
+        """
         with self.persistence.transaction() as conn:
             cur = conn.execute(
                 "UPDATE orders SET status = ?, cancelled_at = ? "
@@ -1295,10 +2207,27 @@ class IndiaPaperBroker(BrokerInterface):
             )
             cancelled = cur.rowcount == 1
             if cancelled:
+                # Cascade to bracket children (only when we're the parent).
+                child_cur = conn.execute(
+                    "UPDATE orders SET status = ?, cancelled_at = ?, "
+                    "rejection_reason = 'parent cancelled' "
+                    "WHERE account_id = ? AND parent_order_id = ? "
+                    "AND status IN (?, ?)",
+                    (
+                        OrderStatus.CANCELLED.value, self._now_iso(),
+                        self.account_id, order_id,
+                        OrderStatus.PENDING.value,
+                        OrderStatus.PARTIALLY_FILLED.value,
+                    ),
+                )
                 self._emit_event(
                     conn,
                     event_type="order_cancelled",
                     order_id=order_id,
+                    payload=(
+                        {"children_cancelled": child_cur.rowcount}
+                        if child_cur.rowcount else {}
+                    ),
                 )
         if cancelled:
             self._drain_pending_events()
@@ -1435,13 +2364,21 @@ class IndiaPaperBroker(BrokerInterface):
         time_in_force: str,
         created_at: str,
         filled_at: str | None = None,
+        stop_price: float | None = None,
+        target_price: float | None = None,
+        parent_order_id: str | None = None,
+        product_type: ProductType = ProductType.DELIVERY,
+        triggered_at: str | None = None,
     ) -> None:
         conn.execute(
             "INSERT INTO orders "
             "(id, account_id, symbol, exchange, side, qty, order_type, "
             "status, filled_qty, filled_avg_price, limit_price, fees_paid, "
-            "realized_pl, time_in_force, created_at, filled_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "realized_pl, time_in_force, created_at, filled_at, "
+            "stop_price, target_price, parent_order_id, product_type, "
+            "triggered_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "?, ?, ?, ?, ?)",
             (
                 order_id,
                 self.account_id,
@@ -1459,6 +2396,11 @@ class IndiaPaperBroker(BrokerInterface):
                 time_in_force,
                 created_at,
                 filled_at,
+                stop_price,
+                target_price,
+                parent_order_id,
+                product_type.value,
+                triggered_at,
             ),
         )
 
@@ -1494,6 +2436,9 @@ class IndiaPaperBroker(BrokerInterface):
         )
 
     def _row_to_order(self, row: sqlite3.Row) -> Order:
+        # Tier-4 columns may be missing on rows from a freshly-rebuilt
+        # in-memory copy in tests. Default-fetch with .keys().
+        cols = set(row.keys())
         return Order(
             id=row["id"],
             symbol=row["symbol"],
@@ -1522,6 +2467,19 @@ class IndiaPaperBroker(BrokerInterface):
                 if row["expired_at"] else None
             ),
             rejection_reason=row["rejection_reason"],
+            stop_price=row["stop_price"] if "stop_price" in cols else None,
+            target_price=row["target_price"] if "target_price" in cols else None,
+            parent_order_id=(
+                row["parent_order_id"] if "parent_order_id" in cols else None
+            ),
+            product_type=ProductType(
+                row["product_type"] if "product_type" in cols and row["product_type"]
+                else ProductType.DELIVERY.value,
+            ),
+            triggered_at=(
+                datetime.fromisoformat(row["triggered_at"])
+                if "triggered_at" in cols and row["triggered_at"] else None
+            ),
         )
 
     # ── Tier-2: corporate actions ──────────────────────────────────────

@@ -10,7 +10,15 @@ from __future__ import annotations
 import pytest
 from typer.testing import CliRunner
 
-from papertrade_india import IndiaPaperBroker, PriceFeed
+from papertrade_india import (
+    IndiaPaperBroker,
+    LatencyConfig,
+    OrderBookConfig,
+    PriceFeed,
+    RejectionConfig,
+    SettlementConfig,
+    SettlementMode,
+)
 from papertrade_india.cli import app
 
 pytestmark = pytest.mark.integration
@@ -27,6 +35,14 @@ def _seed_account(tmp_path, stub_provider, account_id="t3"):
         account_id=account_id,
         price_feed=feed,
         enforce_market_hours=False,
+        # The CLI tests do same-day buy+sell to populate the ledger;
+        # turn off the realism layers so settlement and book impact
+        # don't interfere with the seed data.
+        order_book_config=OrderBookConfig(enabled=False),
+        settlement_config=SettlementConfig(mode=SettlementMode.T_PLUS_0),
+        latency_config=LatencyConfig(submit_ms_mean=0.0),
+        rejection_config=RejectionConfig(rate=0.0),
+        mark_to_bid=False,
     )
     broker.buy("RELIANCE", 1)
     broker.sell("RELIANCE", 1)

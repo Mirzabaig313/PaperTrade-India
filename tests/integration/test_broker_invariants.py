@@ -41,6 +41,16 @@ class _StubProvider:
 
 
 def _make_broker(tmp_path, prices, initial=10_000_000.0):
+    """Build a broker with realism layers off so the property tests
+    can do same-day buy/sell round-trips without tripping T+1 or
+    paying book impact."""
+    from papertrade_india import (
+        LatencyConfig,
+        OrderBookConfig,
+        RejectionConfig,
+        SettlementConfig,
+        SettlementMode,
+    )
     feed = PriceFeed(providers=[_StubProvider(prices)],
                      short_cache_ttl_seconds=0)
     return IndiaPaperBroker(
@@ -49,6 +59,11 @@ def _make_broker(tmp_path, prices, initial=10_000_000.0):
         account_id="fuzz",
         price_feed=feed,
         enforce_market_hours=False,
+        order_book_config=OrderBookConfig(enabled=False),
+        settlement_config=SettlementConfig(mode=SettlementMode.T_PLUS_0),
+        latency_config=LatencyConfig(submit_ms_mean=0.0),
+        rejection_config=RejectionConfig(rate=0.0),
+        mark_to_bid=False,
     )
 
 
