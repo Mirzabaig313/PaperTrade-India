@@ -1,28 +1,29 @@
-"""Price feed with fallback chain.
+"""Price feed — coordinates the chain of market-data providers.
 
-We layer providers so a transient yfinance outage doesn't take the broker
-down:
+Backwards-compat layer over :mod:`papertrade_india.providers`. Existing
+callers see the same surface they always have:
 
-    yfinance  →  jugaad-data  →  cached last-known
+  - :class:`PriceProvider` Protocol (any object with a ``get_price`` method)
+  - :class:`YFinanceProvider`, :class:`JugaadDataProvider`,
+    :class:`CachedLastKnownProvider`
+  - :class:`PriceFeed` with ``get_price`` and ``get_quote``
+  - :class:`Quote` (legacy quote dataclass)
 
-Every successful fetch updates the persistent cache (TTL-bounded) and the
-short-lived in-memory cache that absorbs rapid repeat calls (e.g.
-``get_positions()`` for many holdings in one tick).
+New code should prefer :mod:`papertrade_india.providers` directly:
 
-Fail behavior: if every provider returns ``None`` AND the persistent cache
-is expired, ``PriceFeed.get_price`` raises ``PriceUnavailableError``. The
-broker treats this as fatal for new orders; for valuation of existing
-positions it falls back to ``avg_cost`` (i.e. shows zero unrealized P&L).
+  >>> from papertrade_india.providers import (
+  ...     YFinanceProvider, MedianAggregation, CompositeProvider,
+  ...     CircuitBreakerProvider, MarketQuote,
+  ... )
 
-Quote source tracking (Tier 2)
-------------------------------
-``PriceFeed.get_quote(symbol)`` returns a ``Quote`` (price + source +
-timestamp). ``Quote.is_stale`` is True when the price came from the
-long-lived cache rather than a live provider — the broker uses this to
-implement ``enforce_fresh_prices=True`` mode for autonomous deployments.
+The bridge:
 
-``PriceFeed.get_price()`` still returns a bare float for backwards
-compatibility with anything that doesn't care about staleness.
+- :class:`PriceFeed` accepts both legacy ``PriceProvider`` objects (only
+  ``get_price``) and the new :class:`MarketDataProvider` ABC, so old
+  test stubs keep working.
+- :class:`Quote` and :class:`MarketQuote` are interchangeable in spirit;
+  :class:`Quote` is the narrower view (``price``, ``source``,
+  ``fetched_at``, ``is_stale``) the broker already consumes.
 """
 
 from __future__ import annotations
@@ -34,29 +35,30 @@ from datetime import datetime
 from typing import Protocol
 
 from .exceptions import PriceUnavailableError
+from .providers import (
+    CachedLastKnownProvider,
+    InMemoryShortCache,
+    JugaadDataProvider,
+    MarketDataProvider,
+    MarketQuote,
+    YFinanceProvider,
+)
+from .providers.base import ProviderError as _ProviderError
 
 logger = logging.getLogger(__name__)
 
 
+# ── Legacy types kept for back-compat ────────────────────────────────
+
+
 @dataclass(frozen=True)
 class Quote:
-    """A price observation with provenance.
+    """A price observation with provenance (legacy view).
 
-    Attributes
-    ----------
-    price:
-        The numeric price.
-    source:
-        Identifier of the provider that produced it (e.g. ``"yfinance"``,
-        ``"jugaad-data"``, ``"short_cache"``, ``"long_cache"``).
-    fetched_at:
-        Wall-clock time when this price was first fetched from a live
-        provider. For cached returns, this is the original fetch time
-        (not the time of the cache hit).
-    is_stale:
-        True when the value came from the long-lived cache fallback
-        (i.e. all live providers failed). The short-lived cache is
-        considered fresh.
+    Newer code should prefer :class:`papertrade_india.providers.MarketQuote`,
+    which carries bid/ask/volume/OHLC. ``Quote`` keeps the narrower
+    surface the broker already consumes (price + source + fetched_at +
+    is_stale) so existing callers don't need to migrate.
     """
 
     price: float
@@ -66,114 +68,25 @@ class Quote:
 
 
 class PriceProvider(Protocol):
-    """Anything that can return a last/spot price for a symbol."""
+    """Anything with a ``get_price(symbol) -> float | None``.
+
+    Both legacy stubs and the new :class:`MarketDataProvider` satisfy
+    this. Kept for backwards compatibility with ``PriceFeed(providers=[...])``.
+    """
 
     def get_price(self, symbol: str) -> float | None:
         ...
 
 
-# ── Concrete providers ────────────────────────────────────────────────
-
-
-class YFinanceProvider:
-    """Primary: Yahoo Finance via ``yfinance``.
-
-    NSE symbols use the ``.NS`` suffix (``RELIANCE.NS``); BSE uses ``.BO``.
-    yfinance is the path of least resistance — no API key, no signup —
-    but Yahoo can rate-limit or change response shapes without notice.
-    """
-
-    def __init__(self, exchange_suffix: str = "NS") -> None:
-        self.suffix = exchange_suffix
-
-    def get_price(self, symbol: str) -> float | None:
-        try:
-            # Lazy import: keeps the rest of the package importable when
-            # yfinance is unavailable (e.g. minimal CI containers).
-            import yfinance as yf
-
-            ticker = yf.Ticker(f"{symbol}.{self.suffix}")
-            # ``fast_info`` is faster than ``info`` but occasionally
-            # returns dicts missing keys; fall through to history.
-            try:
-                fi = ticker.fast_info
-                price = (
-                    fi.get("lastPrice")
-                    or fi.get("last_price")
-                    or fi.get("previousClose")
-                    or fi.get("previous_close")
-                )
-                if price:
-                    return float(price)
-            except Exception:  # noqa: BLE001 — fast_info shape is volatile
-                pass
-
-            hist = ticker.history(period="1d")
-            if not hist.empty:
-                return float(hist["Close"].iloc[-1])
-        except Exception as e:  # noqa: BLE001 — network/lib volatility
-            logger.warning("YFinance failed for %s: %s", symbol, e)
-        return None
-
-
-class JugaadDataProvider:
-    """Fallback: ``jugaad-data`` scrapes NSE directly. NSE only.
-
-    jugaad-data is community-maintained and fragile by nature (it parses
-    the NSE site). Use only as fallback — the community keeps it working
-    for most common symbols, but treat failures as expected.
-    """
-
-    def get_price(self, symbol: str) -> float | None:
-        try:
-            from jugaad_data.nse import NSELive  # type: ignore
-
-            n = NSELive()
-            data = n.stock_quote(symbol)
-            return float(data["priceInfo"]["lastPrice"])
-        except ImportError:
-            logger.debug(
-                "jugaad-data not installed; skipping fallback. "
-                "Install with: pip install 'papertrade-india[jugaad]'"
-            )
-            return None
-        except Exception as e:  # noqa: BLE001 — scraper is volatile
-            logger.warning("jugaad-data failed for %s: %s", symbol, e)
-            return None
-
-
-class CachedLastKnownProvider:
-    """Final fallback: most recently fetched price for each symbol."""
-
-    def __init__(self, ttl_seconds: int = 3600) -> None:
-        self._cache: dict[str, tuple[float, datetime]] = {}
-        self.ttl = ttl_seconds
-
-    def update(self, symbol: str, price: float) -> None:
-        self._cache[symbol] = (price, datetime.now())
-
-    def get_price(self, symbol: str) -> float | None:
-        entry = self._cache.get(symbol)
-        if entry is None:
-            return None
-        price, fetched_at = entry
-        if (datetime.now() - fetched_at).total_seconds() > self.ttl:
-            return None
-        return price
-
-    def get_entry(self, symbol: str) -> tuple[float, datetime] | None:
-        """Return the cached (price, fetched_at) tuple, or ``None``.
-
-        Used by ``PriceFeed.get_quote`` to surface the original fetch
-        timestamp on a stale-cache fallback.
-        """
-        entry = self._cache.get(symbol)
-        if entry is None:
-            return None
-        price, fetched_at = entry
-        if (datetime.now() - fetched_at).total_seconds() > self.ttl:
-            return None
-        return price, fetched_at
+# Legacy aliases — kept for ``from papertrade_india import ...``
+__all__ = [
+    "Quote",
+    "PriceProvider",
+    "PriceFeed",
+    "YFinanceProvider",
+    "JugaadDataProvider",
+    "CachedLastKnownProvider",
+]
 
 
 # ── Coordinator ───────────────────────────────────────────────────────
@@ -183,96 +96,159 @@ class PriceFeed:
     """Multi-provider price feed with fallback chain.
 
     Tries each provider in order, returns the first non-``None`` price.
-    Logs every fallback so degradation is visible.
+    Logs every fallback so degradation is visible in the structured log.
+
+    The class accepts both legacy-shaped ``PriceProvider`` objects and
+    new :class:`MarketDataProvider` instances. When a provider is the
+    new shape, ``get_quote`` calls flow through ``provider.get_quote()``
+    (which carries source/timestamp/staleness directly); when it's the
+    legacy shape we fabricate a quote with ``source=type(provider).__name__``
+    and ``fetched_at=now``.
     """
 
     def __init__(
         self,
-        providers: list[PriceProvider] | None = None,
+        providers: list[PriceProvider | MarketDataProvider] | None = None,
         cache_ttl_seconds: int = 60 * 60,
         short_cache_ttl_seconds: float = 5.0,
     ) -> None:
         self.cache = CachedLastKnownProvider(ttl_seconds=cache_ttl_seconds)
-        # Order matters — primary first.
-        self.providers = (
+        self.providers: list[PriceProvider | MarketDataProvider] = (
             providers
             if providers is not None
             else [YFinanceProvider("NS"), JugaadDataProvider()]
         )
-        # In-memory short-lived cache to avoid hammering yfinance for
-        # multiple positions in the same ``get_positions()`` call.
-        self._short_cache: dict[str, tuple[float, float]] = {}
-        self._short_cache_ttl = short_cache_ttl_seconds
+        self._short_cache = InMemoryShortCache(ttl_seconds=short_cache_ttl_seconds)
 
     def get_price(self, symbol: str) -> float:
-        """Backwards-compatible bare-float accessor.
-
-        Internally calls ``get_quote`` and discards the staleness info.
-        New code that cares about source/staleness should use
-        ``get_quote`` directly.
-        """
+        """Backwards-compatible bare-float accessor."""
         return self.get_quote(symbol).price
 
     def get_quote(self, symbol: str) -> Quote:
         """Fetch a price with provenance.
 
         Tries the short cache, then each live provider in order, then
-        the long-lived cache. Always returns a ``Quote`` or raises
-        ``PriceUnavailableError`` — never silently degrades.
+        the long-lived cache. Always returns a :class:`Quote` or raises
+        :class:`PriceUnavailableError` — never silently degrades.
         """
         # Short cache check — counts as fresh, source = "short_cache".
-        entry = self._short_cache.get(symbol)
-        if entry is not None:
-            price, t = entry
-            if (time.time() - t) < self._short_cache_ttl:
-                return Quote(
-                    price=price,
-                    source="short_cache",
-                    fetched_at=datetime.fromtimestamp(t),
-                    is_stale=False,
-                )
+        cached = self._short_cache.get(symbol)
+        if cached is not None:
+            price, t = cached
+            return Quote(
+                price=price,
+                source="short_cache",
+                fetched_at=datetime.fromtimestamp(t),
+                is_stale=False,
+            )
 
         for provider in self.providers:
-            try:
-                price = provider.get_price(symbol)
-            except Exception as e:  # noqa: BLE001 — defensive
-                logger.warning(
-                    "Provider %s raised: %s", type(provider).__name__, e,
-                )
-                price = None
-            if price is not None:
-                now = datetime.now()
-                self.cache.update(symbol, price)
-                self._short_cache[symbol] = (price, time.time())
+            quote = self._call_provider(provider, symbol)
+            if quote is not None:
+                self.cache.update(symbol, quote.last)
+                self._short_cache.put(symbol, quote.last)
+                # Quote.is_stale historically means "served from the
+                # long cache", *not* "delayed feed". A live yfinance
+                # quote is delayed but not stale in this sense.
                 return Quote(
-                    price=price,
-                    source=type(provider).__name__,
-                    fetched_at=now,
+                    price=quote.last,
+                    source=quote.source,
+                    fetched_at=quote.timestamp,
                     is_stale=False,
                 )
 
-        # Last resort: long-lived cache. This is the staleness path.
-        cached = self.cache.get_entry(symbol)
-        if cached is not None:
-            price, fetched_at = cached
+        # Last resort: long-lived cache.
+        cached_quote = self.cache.get_quote(symbol)
+        if cached_quote is not None:
             logger.warning(
                 "Using cached price for %s — all live providers failed "
                 "(cache age: %s)",
-                symbol, datetime.now() - fetched_at,
+                symbol, datetime.now() - cached_quote.timestamp,
             )
             return Quote(
-                price=price,
-                source="long_cache",
-                fetched_at=fetched_at,
+                price=cached_quote.last,
+                source=cached_quote.source,
+                fetched_at=cached_quote.timestamp,
                 is_stale=True,
             )
 
         raise PriceUnavailableError(
             f"Cannot fetch price for {symbol} — "
-            f"all providers failed and no cached value is available"
+            f"all providers failed and no cached value is available",
         )
 
     def prime(self, symbol: str, price: float) -> None:
         """Seed the cache (useful in tests, or with EOD bhavcopy data)."""
         self.cache.update(symbol, price)
-        self._short_cache[symbol] = (price, time.time())
+        self._short_cache.put(symbol, price)
+
+    # ── Internals ─────────────────────────────────────────────────────
+
+    def _call_provider(
+        self,
+        provider: PriceProvider | MarketDataProvider,
+        symbol: str,
+    ) -> MarketQuote | None:
+        """Call ``provider`` and normalize its return into a MarketQuote.
+
+        Accepts both legacy ``get_price(symbol) -> float | None`` providers
+        and new ``MarketDataProvider``s.
+        """
+        # New-style provider: prefer get_quote when present.
+        if isinstance(provider, MarketDataProvider):
+            try:
+                return provider.get_quote(symbol)
+            except _ProviderError as e:
+                logger.warning("provider %s raised: %s", provider.name, e)
+                return None
+            except Exception as e:  # noqa: BLE001 — defensive
+                logger.warning(
+                    "provider %s raised unexpectedly: %s",
+                    provider.name, e,
+                )
+                return None
+
+        # Legacy-style provider: thin shim.
+        try:
+            price = provider.get_price(symbol)
+        except Exception as e:  # noqa: BLE001 — defensive
+            logger.warning(
+                "Provider %s raised: %s", type(provider).__name__, e,
+            )
+            return None
+        if price is None:
+            return None
+        return MarketQuote(
+            last=float(price),
+            timestamp=datetime.now(),
+            source=type(provider).__name__,
+            is_real_time=False,
+        )
+
+    # ── Convenience for new code ─────────────────────────────────────
+
+    def get_market_quote(self, symbol: str) -> MarketQuote:
+        """Return the rich :class:`MarketQuote` (bid/ask/volume/OHLC).
+
+        Companion to :meth:`get_quote`. Useful for callers that want
+        the full quote shape without going through the legacy
+        :class:`Quote` adapter.
+        """
+        for provider in self.providers:
+            quote = self._call_provider(provider, symbol)
+            if quote is not None:
+                self.cache.update(symbol, quote.last)
+                self._short_cache.put(symbol, quote.last)
+                return quote
+        cached_quote = self.cache.get_quote(symbol)
+        if cached_quote is not None:
+            return cached_quote
+        raise PriceUnavailableError(
+            f"Cannot fetch price for {symbol} — all providers failed "
+            f"and no cached value is available",
+        )
+
+
+# ``time`` is only used to keep the legacy import surface stable for any
+# downstream that imported the module with ``import time``-side effects.
+_ = time

@@ -50,6 +50,12 @@ for the full landscape review.
 
 - Real NSE/BSE prices via `yfinance`, with `jugaad-data` fallback and a
   cached last-known fallback. Three layers of degradation.
+- **Pluggable data-provider system** — formal `MarketDataProvider` ABC
+  with bid/ask/OHLCV/volume support, capability flags, per-provider
+  circuit breakers, median aggregation across multiple sources, and a
+  name registry. Built-in providers: `yfinance`, `jugaad-data`, `stooq`,
+  `nse-bhavcopy` (official NSE EOD), `nsepython`, `alphavantage`,
+  `twelvedata`, `finnhub`. See [examples/08_data_providers.py](examples/08_data_providers.py).
 - Realistic Indian fees: brokerage, **STT**, exchange charges, **GST**,
   SEBI charges, **stamp duty**, **DP charges**. Configurable per-broker.
 - Thread-safe SQLite persistence with WAL mode and atomic transactions.
@@ -361,6 +367,65 @@ def to_metrics(event):
 
 broker.events.subscribe(to_metrics, name="prom-shipper")
 ```
+
+### Data-provider system (new in v0.2)
+
+The price feed is a chain of `MarketDataProvider`s — a formal ABC that
+delivers a rich `MarketQuote` (last/bid/ask/OHLC/volume/source/freshness),
+not just a float. You can stack circuit breakers and median aggregation
+to get fills closer to "real":
+
+```python
+from papertrade_india import (
+    CircuitBreakerProvider, CompositeProvider, IndiaPaperBroker,
+    MedianAggregation, NSEBhavcopyProvider, PriceFeed,
+    StooqProvider, YFinanceProvider,
+)
+
+feed = PriceFeed(
+    providers=[
+        CompositeProvider(
+            [
+                CircuitBreakerProvider(YFinanceProvider("NS")),
+                CircuitBreakerProvider(StooqProvider()),
+                CircuitBreakerProvider(NSEBhavcopyProvider()),
+            ],
+            aggregation=MedianAggregation(max_disagreement_bps=200),
+        ),
+    ],
+)
+
+broker = IndiaPaperBroker(price_feed=feed)
+```
+
+Built-in providers (each implements `MarketDataProvider`):
+
+| Provider | Source | API key | Real-time | Notes |
+|:---|:---|:---:|:---:|:---|
+| `YFinanceProvider` | Yahoo Finance | ❌ | ❌ (15-min delay) | NSE + BSE |
+| `JugaadDataProvider` | NSE direct (scraper) | ❌ | ❌ | NSE only, scraper |
+| `NSEPythonProvider` | NSE direct (scraper) | ❌ | ❌ | NSE only, alternate scraper |
+| `StooqProvider` | stooq.com CSV | ❌ | ❌ (EOD) | NSE, free |
+| `NSEBhavcopyProvider` | NSE official bhavcopy | ❌ | ❌ (EOD) | Authoritative EOD |
+| `AlphaVantageProvider` | alphavantage.co | ✅ `ALPHA_VANTAGE_API_KEY` | ❌ | Free tier 5 req/min |
+| `TwelveDataProvider` | twelvedata.com | ✅ `TWELVE_DATA_API_KEY` | ❌ | Free tier 800/day |
+| `FinnhubProvider` | finnhub.io | ✅ `FINNHUB_API_KEY` | ✅ | Free tier 60/min |
+
+Discover what's installed on your machine via the registry:
+
+```python
+from papertrade_india import default_registry
+
+for name, info in default_registry.available().items():
+    print(name, "—", info.description)
+```
+
+Every provider is wrappable in `CircuitBreakerProvider` (per the
+project's resiliency rules) and aggregatable via `CompositeProvider`
+with a strategy of your choice (default `first_wins`, or
+`MedianAggregation` for harder-to-skew fills). Old code that uses the
+legacy `PriceProvider` Protocol shape (objects with just `get_price`)
+continues to work — the chain mixes both styles.
 
 ## How fees are modelled
 

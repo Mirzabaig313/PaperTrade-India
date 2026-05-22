@@ -17,6 +17,9 @@ Public API
 - Fee config: :class:`FeeConfig`, :class:`IndianFeeEngine`, :class:`FeeBreakdown`
 - Calendar: :class:`NSECalendar`
 - Price feed: :class:`PriceFeed`, :class:`YFinanceProvider`, :class:`JugaadDataProvider`
+- Provider system (new): :class:`MarketDataProvider`, :class:`MarketQuote`, :class:`OHLCV`,
+  :class:`StooqProvider`, :class:`NSEBhavcopyProvider`, :class:`CompositeProvider`,
+  :class:`CircuitBreakerProvider`, :class:`ProviderRegistry`, :data:`default_registry`
 - Limit-order watcher: :class:`LimitOrderWatcher`
 - Exceptions: :class:`IndiaPaperBrokerError` and subclasses
 """
@@ -66,6 +69,22 @@ from .price_feed import (
     Quote,
     YFinanceProvider,
 )
+from .providers import (
+    OHLCV,
+    CircuitBreakerProvider,
+    CompositeProvider,
+    MarketDataProvider,
+    MarketQuote,
+    MedianAggregation,
+    NSEBhavcopyProvider,
+    ProviderCapability,
+    ProviderError,
+    ProviderHealth,
+    ProviderInfo,
+    ProviderRegistry,
+    StooqProvider,
+    default_registry,
+)
 from .quickstart import quickstart
 from .risk import RiskConfig, RiskContext, RiskEngine
 from .slippage import SlippageConfig, apply_slippage
@@ -101,6 +120,21 @@ __all__ = [
     "PriceProvider",
     "Quote",
     "YFinanceProvider",
+    # New provider system
+    "MarketDataProvider",
+    "MarketQuote",
+    "OHLCV",
+    "ProviderCapability",
+    "ProviderError",
+    "ProviderInfo",
+    "ProviderHealth",
+    "CircuitBreakerProvider",
+    "CompositeProvider",
+    "MedianAggregation",
+    "ProviderRegistry",
+    "default_registry",
+    "StooqProvider",
+    "NSEBhavcopyProvider",
     # Background workers
     "LimitOrderWatcher",
     # Tier-1: slippage / risk / symbols
