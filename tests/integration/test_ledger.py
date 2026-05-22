@@ -15,9 +15,11 @@ from papertrade_india import (
     IndiaPaperBroker,
     LatencyConfig,
     OrderBookConfig,
+    PartialFillConfig,
     RejectionConfig,
     SettlementConfig,
     SettlementMode,
+    SlippageConfig,
 )
 
 pytestmark = pytest.mark.integration
@@ -189,14 +191,17 @@ def test_invariant_under_random_ops(tmp_path, price_feed, stub_provider):
         price_feed=price_feed,
         enforce_market_hours=False,
         # Property fuzz tests do same-day round-trips of various sizes.
-        # Realism layers (T+1, book impact) would trip those without
-        # adding signal to the cash-invariant check we actually care
-        # about. Disable them here.
+        # Realism layers (T+1, book impact, slippage, partial fills,
+        # latency, rejection) would trip those without adding signal
+        # to the cash-invariant check we actually care about.
         order_book_config=OrderBookConfig(enabled=False),
         settlement_config=SettlementConfig(mode=SettlementMode.T_PLUS_0),
         latency_config=LatencyConfig(submit_ms_mean=0.0),
         rejection_config=RejectionConfig(rate=0.0),
+        partial_fill_config=PartialFillConfig(enabled=False),
+        slippage_config=SlippageConfig(bps=0.0),
         mark_to_bid=False,
+        enforce_fresh_prices=False,
     )
 
     rng = random.Random(0xF00D)

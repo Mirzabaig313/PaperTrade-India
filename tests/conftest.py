@@ -66,8 +66,9 @@ def broker(tmp_path, price_feed):
 
     Most pre-realism tests check exact fill prices, exact cash deltas,
     and same-day buy/sell round-trips. Those assertions only hold when
-    the order-book sim, latency, rejection, and T+1 settlement layers
-    are off. We provide that "minimal" broker here.
+    the order-book sim, latency, rejection, slippage, partial fills,
+    fresh-price enforcement, and T+1 settlement layers are off. We
+    provide that "minimal" broker here.
 
     Tests that exercise the realism layer construct their own
     ``IndiaPaperBroker`` directly (see ``tests/integration/test_realism*.py``).
@@ -76,9 +77,11 @@ def broker(tmp_path, price_feed):
         IndiaPaperBroker,
         LatencyConfig,
         OrderBookConfig,
+        PartialFillConfig,
         RejectionConfig,
         SettlementConfig,
         SettlementMode,
+        SlippageConfig,
     )
 
     return IndiaPaperBroker(
@@ -93,7 +96,10 @@ def broker(tmp_path, price_feed):
         settlement_config=SettlementConfig(mode=SettlementMode.T_PLUS_0),
         latency_config=LatencyConfig(submit_ms_mean=0.0),
         rejection_config=RejectionConfig(rate=0.0),
+        partial_fill_config=PartialFillConfig(enabled=False),
+        slippage_config=SlippageConfig(bps=0.0),
         mark_to_bid=False,
+        enforce_fresh_prices=False,
     )
 
 

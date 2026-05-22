@@ -389,9 +389,11 @@ broker.events.subscribe(to_metrics, name="prom-shipper")
 
 ### Realism extensions (new in v0.2)
 
-By default, the broker behaves exactly like v0.1.x: instant fills, no
-tick/lot enforcement, T+0 cash, mark-off-last. Each realism feature is
-an opt-in config object:
+Every realism feature is **on by default** so a fresh broker behaves
+like a real Indian retail account: T+1 cash settlement, mark-to-bid
+P&L, tick/lot/band rules, latency, occasional rejections, synthetic
+order book. Override any of them by passing the matching config
+object — set `enabled=False` or pass the legacy mode to opt out:
 
 ```python
 from datetime import time
@@ -401,8 +403,12 @@ from papertrade_india import (
     RejectScenario,
 )
 
+# Default broker — all realism on:
+broker = IndiaPaperBroker(initial_capital=1_000_000)
+
+# Or override individual layers:
 broker = IndiaPaperBroker(
-    # 1–3: tick/lot/band — fully on by default. Disable any flag to skip.
+    # 1–3: tick/lot/band — all enforced by default. Disable any flag to skip.
     microstructure_config=MicrostructureConfig(
         enforce_tick_size=True,
         enforce_lot_size=True,
@@ -410,25 +416,25 @@ broker = IndiaPaperBroker(
         default_tick_size=0.05,    # NSE cash equity
         default_band_pct=0.20,     # ±20% if symbol master has no override
     ),
-    # 4: T+1 settlement + intraday auto-square-off
+    # 4: T+1 settlement is the default; switch to T+0 for legacy backtests
     settlement_config=SettlementConfig(
-        mode=SettlementMode.T_PLUS_1,    # T+0 by default
+        mode=SettlementMode.T_PLUS_1,    # T+1 by default
         auto_square_off_at=time(15, 15),
     ),
-    # 5: synthetic L2 book + queue position + Almgren impact
+    # 5: synthetic L2 book + queue position + Almgren impact (on by default)
     order_book_config=OrderBookConfig(
         enabled=True,
         levels=10,
         depth_pct_of_adv=0.005,    # 0.5% of ADV at the touch
         almgren_coeff_bps=50.0,    # 50 bps for 100% of ADV
     ),
-    # 6: latency + random rejections
+    # 6: latency + random rejections (on by default with sane parameters)
     latency_config=LatencyConfig(submit_ms_mean=80, submit_ms_p99=400),
     rejection_config=RejectionConfig(
         rate=0.001,
         scenarios=[RejectScenario.NETWORK, RejectScenario.FREEZE_QTY],
     ),
-    # 7: mark unrealized P&L off the bid (real-broker convention)
+    # 7: mark unrealized P&L off the bid (real-broker convention) — on by default
     mark_to_bid=True,
 )
 ```

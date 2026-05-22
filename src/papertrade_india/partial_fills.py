@@ -50,10 +50,18 @@ class PartialFillConfig:
     def fill_qty(self, remaining_qty: float) -> float:
         """Compute how many shares to fill on this tick.
 
-        Returns 0 (no fill this tick) or a value in [min_fill_qty, remaining_qty].
+        Returns 0 (no fill this tick) or a value in
+        ``[min_fill_qty, remaining_qty]``, with one exception: when
+        ``remaining_qty <= min_fill_qty``, we fill ``remaining_qty``
+        in a single shot. Otherwise small orders (or the last sliver
+        of a large order) would never fill.
         """
         if not self.enabled or remaining_qty <= 0:
             return remaining_qty  # disabled = full fill (legacy)
+
+        # Whole-order-fits-in-one-tick: don't bother slicing.
+        if remaining_qty <= self.min_fill_qty:
+            return float(remaining_qty)
 
         candidates: list[float] = [remaining_qty]
         if self.max_per_tick is not None:

@@ -14,10 +14,12 @@ from papertrade_india import (
     IndiaPaperBroker,
     LatencyConfig,
     OrderBookConfig,
+    PartialFillConfig,
     PriceFeed,
     RejectionConfig,
     SettlementConfig,
     SettlementMode,
+    SlippageConfig,
 )
 from papertrade_india.cli import app
 
@@ -35,14 +37,17 @@ def _seed_account(tmp_path, stub_provider, account_id="t3"):
         account_id=account_id,
         price_feed=feed,
         enforce_market_hours=False,
-        # The CLI tests do same-day buy+sell to populate the ledger;
-        # turn off the realism layers so settlement and book impact
+        # CLI tests do same-day buy+sell to populate the ledger; turn
+        # off realism layers so settlement, book impact, and friends
         # don't interfere with the seed data.
         order_book_config=OrderBookConfig(enabled=False),
         settlement_config=SettlementConfig(mode=SettlementMode.T_PLUS_0),
         latency_config=LatencyConfig(submit_ms_mean=0.0),
         rejection_config=RejectionConfig(rate=0.0),
+        partial_fill_config=PartialFillConfig(enabled=False),
+        slippage_config=SlippageConfig(bps=0.0),
         mark_to_bid=False,
+        enforce_fresh_prices=False,
     )
     broker.buy("RELIANCE", 1)
     broker.sell("RELIANCE", 1)

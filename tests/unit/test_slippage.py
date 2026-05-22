@@ -16,29 +16,39 @@ def _legacy_broker(tmp_path, price_feed, **kwargs):
     """Construct a broker with realism layers off so we can isolate slippage.
 
     The Tier-4 defaults (synthetic order book, T+1, mark-to-bid, latency,
-    rejection) all interact with fill prices. To exercise the slippage
-    model in isolation we disable them. Realism-aware tests live in
+    rejection, default-on slippage, partial fills) all interact with
+    fill prices. To exercise the slippage model in isolation we disable
+    them. Realism-aware tests live in
     ``tests/integration/test_realism_*``.
+
+    Caller-supplied ``**kwargs`` win over the legacy overrides (so a
+    test that wants ``slippage_config=SlippageConfig(bps=10)`` actually
+    gets 10 bps, not the legacy zero).
     """
     from papertrade_india import (
         IndiaPaperBroker,
         LatencyConfig,
         OrderBookConfig,
+        PartialFillConfig,
         RejectionConfig,
         SettlementConfig,
         SettlementMode,
     )
 
-    return IndiaPaperBroker(
-        price_feed=price_feed,
-        enforce_market_hours=False,
-        order_book_config=OrderBookConfig(enabled=False),
-        settlement_config=SettlementConfig(mode=SettlementMode.T_PLUS_0),
-        latency_config=LatencyConfig(submit_ms_mean=0.0),
-        rejection_config=RejectionConfig(rate=0.0),
-        mark_to_bid=False,
-        **kwargs,
-    )
+    defaults: dict[str, object] = {
+        "price_feed": price_feed,
+        "enforce_market_hours": False,
+        "order_book_config": OrderBookConfig(enabled=False),
+        "settlement_config": SettlementConfig(mode=SettlementMode.T_PLUS_0),
+        "latency_config": LatencyConfig(submit_ms_mean=0.0),
+        "rejection_config": RejectionConfig(rate=0.0),
+        "partial_fill_config": PartialFillConfig(enabled=False),
+        "slippage_config": SlippageConfig(bps=0.0),
+        "mark_to_bid": False,
+        "enforce_fresh_prices": False,
+    }
+    defaults.update(kwargs)
+    return IndiaPaperBroker(**defaults)
 
 
 def test_zero_bps_is_identity():

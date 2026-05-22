@@ -52,7 +52,7 @@ class LimitOrderWatcher(threading.Thread):
         broker: IndiaPaperBroker,
         interval_seconds: float = 5.0,
         daemon: bool = True,
-        idempotency_cleanup_every: int | None = None,
+        idempotency_cleanup_every: int | None = 100,
         idempotency_ttl_hours: int = 24,
         settle_due_every: int | None = None,
         auto_square_off_intraday: bool = True,

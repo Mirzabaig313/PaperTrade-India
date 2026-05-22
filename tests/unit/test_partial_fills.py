@@ -42,9 +42,13 @@ def test_min_fill_qty_floors():
 
 
 def test_below_min_fill_when_remaining_small():
-    """If remaining is below min_fill_qty, skip too."""
+    """If remaining is below ``min_fill_qty`` we fill the whole remainder
+    rather than parking it forever — otherwise small or last-sliver
+    orders would never complete."""
     cfg = PartialFillConfig(enabled=True, min_fill_qty=10)
-    assert cfg.fill_qty(5) == 0
+    assert cfg.fill_qty(5) == 5
+    # Equal to ``min_fill_qty`` also fills in one shot.
+    assert cfg.fill_qty(10) == 10
 
 
 def test_fractional_caps_floored():

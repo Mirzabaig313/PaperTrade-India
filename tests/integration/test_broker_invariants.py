@@ -47,9 +47,11 @@ def _make_broker(tmp_path, prices, initial=10_000_000.0):
     from papertrade_india import (
         LatencyConfig,
         OrderBookConfig,
+        PartialFillConfig,
         RejectionConfig,
         SettlementConfig,
         SettlementMode,
+        SlippageConfig,
     )
     feed = PriceFeed(providers=[_StubProvider(prices)],
                      short_cache_ttl_seconds=0)
@@ -63,7 +65,10 @@ def _make_broker(tmp_path, prices, initial=10_000_000.0):
         settlement_config=SettlementConfig(mode=SettlementMode.T_PLUS_0),
         latency_config=LatencyConfig(submit_ms_mean=0.0),
         rejection_config=RejectionConfig(rate=0.0),
+        partial_fill_config=PartialFillConfig(enabled=False),
+        slippage_config=SlippageConfig(bps=0.0),
         mark_to_bid=False,
+        enforce_fresh_prices=False,
     )
 
 

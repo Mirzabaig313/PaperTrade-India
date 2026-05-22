@@ -137,7 +137,7 @@ class IndiaPaperBroker(BrokerInterface):
         slippage_config: SlippageConfig | None = None,
         risk_config: RiskConfig | None = None,
         symbol_master: SymbolMaster | None = None,
-        enforce_fresh_prices: bool = False,
+        enforce_fresh_prices: bool = True,
         partial_fill_config: PartialFillConfig | None = None,
         event_bus: EventBus | None = None,
         clock: Clock | None = None,
@@ -177,10 +177,11 @@ class IndiaPaperBroker(BrokerInterface):
         a ``FeeSchedule`` for date-versioned fee schedules. Bare configs
         are wrapped automatically.
 
-        ``enforce_fresh_prices``: when True, reject order fills whose
-        underlying price came from the long-lived stale-price cache.
-        Use for autonomous-agent deployments where halting is safer
-        than executing on a stale price.
+        ``enforce_fresh_prices``: when True (default), reject order
+        fills whose underlying price came from the long-lived stale-price
+        cache. The safe choice for autonomous deployments — halting is
+        better than executing on a price that may be hours old. Set to
+        False for backtests or tests where stale fills are acceptable.
 
         Tier-3 collaborators
         --------------------
@@ -245,11 +246,13 @@ class IndiaPaperBroker(BrokerInterface):
             schedule = FeeSchedule(default=fee_config)
         self.fee_schedule = schedule
 
-        self.slippage_config = slippage_config or SlippageConfig(bps=0.0)
+        self.slippage_config = slippage_config or SlippageConfig()
         self.risk_engine = RiskEngine(risk_config or RiskConfig())
         self.symbol_master = symbol_master or SymbolMaster(strict=False)
 
-        self.partial_fill_config = partial_fill_config or PartialFillConfig()
+        self.partial_fill_config = partial_fill_config or PartialFillConfig(
+            enabled=True, max_pct_per_tick=0.25, min_fill_qty=1,
+        )
         self.events: EventBus = event_bus or EventBus()
         self._pending_events: list[BrokerEvent] = []
         self._clock: Clock = clock or WallClock()
