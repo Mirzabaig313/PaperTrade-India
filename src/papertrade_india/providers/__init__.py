@@ -67,6 +67,23 @@ try:
 except Exception:  # noqa: BLE001
     FinnhubProvider = None  # type: ignore[assignment]
 
+# Broker-feed providers (real bid/ask + depth). Kite/Dhan need a vendor
+# SDK; Upstox is stdlib REST. All are optional and credential-gated.
+try:
+    from .kite import KiteProvider
+except Exception:  # noqa: BLE001
+    KiteProvider = None  # type: ignore[assignment]
+
+try:
+    from .dhan import DhanProvider
+except Exception:  # noqa: BLE001
+    DhanProvider = None  # type: ignore[assignment]
+
+try:
+    from .upstox import UpstoxProvider
+except Exception:  # noqa: BLE001
+    UpstoxProvider = None  # type: ignore[assignment]
+
 
 __all__ = [
     # Base interface
@@ -97,4 +114,8 @@ __all__ = [
     "AlphaVantageProvider",
     "TwelveDataProvider",
     "FinnhubProvider",
+    # Broker-feed providers (optional)
+    "KiteProvider",
+    "DhanProvider",
+    "UpstoxProvider",
 ]

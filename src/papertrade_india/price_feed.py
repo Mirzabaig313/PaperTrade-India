@@ -59,12 +59,23 @@ class Quote:
     which carries bid/ask/volume/OHLC. ``Quote`` keeps the narrower
     surface the broker already consumes (price + source + fetched_at +
     is_stale) so existing callers don't need to migrate.
+    is_stale:
+        ``True`` only when served from the long-lived fallback cache
+        (all live providers failed). The broker's ``enforce_fresh_prices``
+        mode rejects fills on these.
+    is_real_time:
+        ``False`` when the underlying provider is delayed/EOD (e.g.
+        yfinance ~15 min) even though the quote is freshly fetched and
+        not cache-stale. The broker's opt-in ``enforce_real_time`` mode
+        rejects fills on delayed feeds; it defaults off so the public
+        delayed providers keep working unchanged.
     """
 
     price: float
     source: str
     fetched_at: datetime
     is_stale: bool
+    is_real_time: bool = True
 
 
 class PriceProvider(Protocol):
@@ -140,6 +151,7 @@ class PriceFeed:
                 source="short_cache",
                 fetched_at=datetime.fromtimestamp(t),
                 is_stale=False,
+                is_real_time=True,
             )
 
         for provider in self.providers:
@@ -155,6 +167,7 @@ class PriceFeed:
                     source=quote.source,
                     fetched_at=quote.timestamp,
                     is_stale=False,
+                    is_real_time=quote.is_real_time,
                 )
 
         # Last resort: long-lived cache.
@@ -170,6 +183,7 @@ class PriceFeed:
                 source=cached_quote.source,
                 fetched_at=cached_quote.timestamp,
                 is_stale=True,
+                is_real_time=False,
             )
 
         raise PriceUnavailableError(

@@ -174,6 +174,42 @@ def _build_default_registry() -> ProviderRegistry:
     except Exception as e:  # noqa: BLE001
         logger.debug("finnhub unavailable: %s", e)
 
+    # Broker-feed providers — real bid/ask + depth. Kite and Dhan need a
+    # third-party SDK; Upstox is REST (stdlib) but still needs an account
+    # token, so all three are gated on credentials at call time.
+    try:
+        from .kite import KiteProvider
+        reg.register(
+            "kite",
+            KiteProvider().info,
+            lambda **kw: KiteProvider(**kw),
+            available=_check_import("kiteconnect"),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("kite unavailable: %s", e)
+
+    try:
+        from .dhan import DhanProvider
+        reg.register(
+            "dhan",
+            DhanProvider().info,
+            lambda **kw: DhanProvider(**kw),
+            available=_check_import("dhanhq"),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("dhan unavailable: %s", e)
+
+    try:
+        from .upstox import UpstoxProvider
+        reg.register(
+            "upstox",
+            UpstoxProvider().info,
+            lambda **kw: UpstoxProvider(**kw),
+            available=True,  # stdlib REST — token checked at call time
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("upstox unavailable: %s", e)
+
     return reg
 
 

@@ -59,6 +59,22 @@ mcp = [
     "fastmcp>=0.3",
 ]
 
+# Broker-feed data providers (real bid/ask + market depth).
+# Each needs an account with the respective broker.
+kite = [
+    "kiteconnect>=4.2",
+]
+dhan = [
+    "dhanhq>=2.0",
+]
+# Upstox uses the stdlib REST client — no extra dependency required.
+
+# All broker feeds at once.
+brokers = [
+    "kiteconnect>=4.2",
+    "dhanhq>=2.0",
+]
+
 # Dev / test stack
 dev = [
     "pytest>=8.0",

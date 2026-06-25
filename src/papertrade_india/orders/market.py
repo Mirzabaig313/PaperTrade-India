@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 def execute(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     symbol: str,
     qty: float,
     side: OrderSide,
@@ -115,7 +115,7 @@ def execute(
     return _state.row_to_order(row)
 
 
-def fill_pending_market(ctx: "BrokerContext", order_id: str) -> None:
+def fill_pending_market(ctx: BrokerContext, order_id: str) -> None:
     """Fill a PENDING market order (bracket parent or AMO) at current price.
 
     Reuses the standard execution path so fees/ledger/events flow
@@ -207,7 +207,7 @@ def fill_pending_market(ctx: "BrokerContext", order_id: str) -> None:
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
-def _get_fill_quote(ctx: "BrokerContext", symbol: str):  # type: ignore[return]
+def _get_fill_quote(ctx: BrokerContext, symbol: str):  # type: ignore[return]
     """Fetch a quote and apply the stale-price guard."""
     from ..domain.exceptions import StalePriceRejected  # noqa: PLC0415
 
@@ -218,11 +218,18 @@ def _get_fill_quote(ctx: "BrokerContext", symbol: str):  # type: ignore[return]
             f"₹{quote.price:.2f} (fetched {quote.fetched_at.isoformat()}). "
             f"Disable enforce_fresh_prices=False to allow stale fills."
         )
+    if ctx.enforce_real_time and not quote.is_real_time:
+        raise StalePriceRejected(
+            f"Refusing to fill {symbol} on a delayed feed "
+            f"(source {quote.source!r}, fetched {quote.fetched_at.isoformat()}). "
+            f"Use a real-time provider (kite/dhan/upstox/finnhub) or set "
+            f"enforce_real_time=False to allow delayed fills."
+        )
     return quote
 
 
 def _maybe_settle_trade(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     conn,
     side: OrderSide,
     symbol: str,
@@ -232,8 +239,9 @@ def _maybe_settle_trade(
     now: str,
 ) -> None:
     """Enqueue a T+1 row for delivery trades; no-op for intraday/T+0."""
-    from ..execution.settlement import SettlementMode  # noqa: PLC0415
     from datetime import datetime as _dt  # noqa: PLC0415
+
+    from ..execution.settlement import SettlementMode  # noqa: PLC0415
 
     if product_type != ProductType.DELIVERY:
         return

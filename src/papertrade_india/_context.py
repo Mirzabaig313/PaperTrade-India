@@ -49,32 +49,36 @@ class BrokerContext:
     """
 
     account_id: str
-    default_exchange: "Exchange"
+    default_exchange: Exchange
 
-    persistence: "Persistence"
-    price_feed: "PriceFeed"
-    calendar: "NSECalendar"
+    persistence: Persistence
+    price_feed: PriceFeed
+    calendar: NSECalendar
 
-    fee_schedule: "FeeSchedule"
-    slippage_config: "SlippageConfig"
-    risk_engine: "RiskEngine"
-    symbol_master: "SymbolMaster"
+    fee_schedule: FeeSchedule
+    slippage_config: SlippageConfig
+    risk_engine: RiskEngine
+    symbol_master: SymbolMaster
 
-    microstructure_config: "MicrostructureConfig"
-    book_sim: "OrderBookSimulator"
-    settlement: "SettlementEngine"
-    latency_sim: "LatencySimulator"
-    reject_sim: "RejectionSimulator"
-    partial_fill_config: "PartialFillConfig"
+    microstructure_config: MicrostructureConfig
+    book_sim: OrderBookSimulator
+    settlement: SettlementEngine
+    latency_sim: LatencySimulator
+    reject_sim: RejectionSimulator
+    partial_fill_config: PartialFillConfig
 
-    events: "EventBus"
-    clock: "Clock"
+    events: EventBus
+    clock: Clock
 
     enforce_market_hours: bool
     enforce_fresh_prices: bool
     mark_to_bid: bool
 
-    pending_events: list["BrokerEvent"] = field(default_factory=list)
+    # Opt-in: reject fills on delayed feeds (provider is_real_time=False).
+    # Defaults False so public delayed providers (yfinance) keep working.
+    enforce_real_time: bool = False
+
+    pending_events: list[BrokerEvent] = field(default_factory=list)
 
     # ── Helpers used by subsystems ────────────────────────────────────
 
@@ -82,7 +86,7 @@ class BrokerContext:
         """ISO timestamp of the broker's current 'now' (clock-aware)."""
         return self.clock.now().isoformat()
 
-    def fee_engine_for(self, when_iso: str) -> "IndianFeeEngine":
+    def fee_engine_for(self, when_iso: str) -> IndianFeeEngine:
         """Build the fee engine for an order's trade date."""
         from .execution.fees import IndianFeeEngine
 

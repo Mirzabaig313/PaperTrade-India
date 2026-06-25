@@ -25,9 +25,7 @@ Public API
 """
 
 from .broker import IndiaPaperBroker
-from .infrastructure.clock import Clock, ReplayClock, WallClock
 from .corporate_actions import CorporateAction
-from .infrastructure.events import Event
 from .domain.exceptions import (
     AccountNotFoundError,
     AMOWindowClosedError,
@@ -51,20 +49,6 @@ from .domain.exceptions import (
     SymbolNotFound,
     TickSizeViolation,
 )
-from .execution.fees import FeeBreakdown, FeeConfig, FeeSchedule, IndianFeeEngine
-from .interface import BrokerInterface
-from .infrastructure.ledger import CashMovement
-from .workers.limit_orders import LimitOrderWatcher
-from .infrastructure.market_hours import IST, NSECalendar, SessionPhase
-from .domain.rules.tick_lot_band import (
-    MicrostructureConfig,
-    round_to_tick,
-)
-from .execution.book import (
-    OrderBook,
-    OrderBookConfig,
-    OrderBookSimulator,
-)
 from .domain.models import (
     Account,
     Exchange,
@@ -77,35 +61,17 @@ from .domain.models import (
     TimeInForce,
     Trade,
 )
-from .infrastructure.observability import BrokerEvent, EventBus, stdlib_log_subscriber
-from .orders.partial_fills import PartialFillConfig
-from .orders.preopen import AuctionMatch, compute_equilibrium
-from .price_feed import (
-    CachedLastKnownProvider,
-    JugaadDataProvider,
-    PriceFeed,
-    PriceProvider,
-    Quote,
-    YFinanceProvider,
-)
-from .providers import (
-    OHLCV,
-    CircuitBreakerProvider,
-    CompositeProvider,
-    MarketDataProvider,
-    MarketQuote,
-    MedianAggregation,
-    NSEBhavcopyProvider,
-    ProviderCapability,
-    ProviderError,
-    ProviderHealth,
-    ProviderInfo,
-    ProviderRegistry,
-    StooqProvider,
-    default_registry,
-)
-from .quickstart import quickstart
 from .domain.rules.risk import RiskConfig, RiskContext, RiskEngine
+from .domain.rules.tick_lot_band import (
+    MicrostructureConfig,
+    round_to_tick,
+)
+from .execution.book import (
+    OrderBook,
+    OrderBookConfig,
+    OrderBookSimulator,
+)
+from .execution.fees import FeeBreakdown, FeeConfig, FeeSchedule, IndianFeeEngine
 from .execution.settlement import (
     PendingSettlement,
     SettlementConfig,
@@ -120,7 +86,44 @@ from .execution.simulation import (
     RejectScenario,
 )
 from .execution.slippage import SlippageConfig, apply_slippage
+from .infrastructure.clock import Clock, ReplayClock, WallClock
+from .infrastructure.events import Event
+from .infrastructure.ledger import CashMovement
+from .infrastructure.market_hours import IST, NSECalendar, SessionPhase
+from .infrastructure.observability import BrokerEvent, EventBus, stdlib_log_subscriber
 from .infrastructure.symbols import SymbolEntry, SymbolMaster
+from .interface import BrokerInterface
+from .orders.partial_fills import PartialFillConfig
+from .orders.preopen import AuctionMatch, compute_equilibrium
+from .price_feed import (
+    CachedLastKnownProvider,
+    JugaadDataProvider,
+    PriceFeed,
+    PriceProvider,
+    Quote,
+    YFinanceProvider,
+)
+from .providers import (
+    OHLCV,
+    CircuitBreakerProvider,
+    CompositeProvider,
+    DhanProvider,
+    KiteProvider,
+    MarketDataProvider,
+    MarketQuote,
+    MedianAggregation,
+    NSEBhavcopyProvider,
+    ProviderCapability,
+    ProviderError,
+    ProviderHealth,
+    ProviderInfo,
+    ProviderRegistry,
+    StooqProvider,
+    UpstoxProvider,
+    default_registry,
+)
+from .quickstart import quickstart
+from .workers.limit_orders import LimitOrderWatcher
 
 __all__ = [
     # Core
@@ -169,6 +172,9 @@ __all__ = [
     "default_registry",
     "StooqProvider",
     "NSEBhavcopyProvider",
+    "KiteProvider",
+    "DhanProvider",
+    "UpstoxProvider",
     # Background workers
     "LimitOrderWatcher",
     # Tier-1: slippage / risk / symbols

@@ -43,6 +43,7 @@ from .domain.models import (
     Position,
     ProductType,
 )
+from .domain.rules.risk import RiskConfig, RiskEngine
 from .domain.rules.tick_lot_band import MicrostructureConfig
 from .execution.book import OrderBookConfig, OrderBookSimulator
 from .execution.fees import FeeConfig, FeeSchedule, IndianFeeEngine
@@ -65,10 +66,9 @@ from .interface import BrokerInterface
 from .orders import amo as _amo
 from .orders import state as _orders_state
 from .orders.partial_fills import PartialFillConfig
-from .orders.preopen import AuctionMatch, _BookRow, compute_equilibrium
+from .orders.preopen import AuctionMatch
 from .orders.submit import submit_order as _submit_order_fn
-from .price_feed import PriceFeed, Quote
-from .domain.rules.risk import RiskConfig, RiskEngine
+from .price_feed import PriceFeed
 from .reads import account as _reads_account
 from .reads import orders as _reads_orders
 from .reads import positions as _reads_positions
@@ -122,6 +122,7 @@ class IndiaPaperBroker(BrokerInterface):
         latency_config: LatencyConfig | None = None,
         rejection_config: RejectionConfig | None = None,
         mark_to_bid: bool = True,
+        enforce_real_time: bool = False,
     ) -> None:
         """Construct a broker bound to ``account_id`` in ``db_path``.
 
@@ -136,6 +137,7 @@ class IndiaPaperBroker(BrokerInterface):
         self.default_exchange = exchange
         self.enforce_market_hours = enforce_market_hours
         self.enforce_fresh_prices = enforce_fresh_prices
+        self.enforce_real_time = enforce_real_time
 
         self.persistence = Persistence(db_path)
         self.price_feed = price_feed or PriceFeed()
@@ -190,6 +192,7 @@ class IndiaPaperBroker(BrokerInterface):
             enforce_market_hours=self.enforce_market_hours,
             enforce_fresh_prices=self.enforce_fresh_prices,
             mark_to_bid=self.mark_to_bid,
+            enforce_real_time=self.enforce_real_time,
             pending_events=self._pending_events,
         )
 
@@ -442,6 +445,7 @@ class IndiaPaperBroker(BrokerInterface):
     def cleanup_idempotency_keys(self, hours: int = 24) -> int:
         """Delete idempotency rows older than ``hours``. Returns count."""
         from datetime import timedelta  # noqa: PLC0415
+
         from .infrastructure import idempotency as _idempotency  # noqa: PLC0415
         with self.persistence.transaction() as conn:
             return _idempotency.cleanup_expired(conn, ttl=timedelta(hours=hours))
