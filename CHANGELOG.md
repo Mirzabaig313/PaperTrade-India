@@ -9,6 +9,134 @@ be called out here.
 
 ## [Unreleased]
 
+### Architecture refactor (internal, no public API changes)
+
+The 3,363-line ``broker.py`` god-class has been broken up into cohesive
+subsystems. Phases 1, 2, 3, 4a, and 5 of the
+[architecture refactor plan](docs/architecture_refactor.md) have landed.
+
+#### New package layout
+
+- ``domain/`` — pure value types and stateless rules
+  - ``domain/models.py`` (← ``models.py``)
+  - ``domain/exceptions.py`` (← ``exceptions.py``)
+  - ``domain/rules/risk.py`` (← ``risk.py``)
+  - ``domain/rules/tick_lot_band.py`` (the validation half of
+    ``microstructure.py``)
+- ``execution/`` — fill mechanics
+  - ``execution/slippage.py``, ``execution/fees.py``,
+    ``execution/settlement.py``, ``execution/simulation.py``
+    (← root ``slippage.py`` etc.)
+  - ``execution/book.py`` (the order-book half of ``microstructure.py``)
+- ``orders/`` — order lifecycle
+  - ``orders/partial_fills.py`` (← ``partial_fills.py``)
+  - ``orders/preopen.py`` (← ``preopen.py``)
+  - ``orders/state.py`` (NEW — ``_record_order``, ``_record_trade``,
+    ``_row_to_order`` extracted from ``IndiaPaperBroker``)
+- ``reads/`` — read-only views over broker state (NEW)
+  - ``reads/positions.py``, ``reads/account.py``, ``reads/orders.py``
+- ``corporate_actions/`` — splits, bonuses, rights, dividends (NEW
+  package replacing ``corporate_actions.py``)
+- ``infrastructure/`` — persistence, observability, clock, market hours,
+  symbols, ledger, events, idempotency (← root modules of the same
+  names)
+- ``workers/limit_orders.py`` (← ``limit_orders.py``)
+- ``_context.py`` — ``BrokerContext`` dataclass that carries shared
+  collaborators to subsystem functions
+
+#### Behavior
+
+- All 490 tests pass without modification.
+- ``IndiaPaperBroker``'s public surface is unchanged: ``buy``, ``sell``,
+  ``get_positions``, ``get_account``, ``apply_split`` and friends keep
+  the same signatures and return shapes.
+- ``broker.py`` line count: 3,363 → 2,717 (-19%). Order flow
+  (``_submit_order``, ``_execute_market_order``, bracket/stop/limit
+  bookkeeping, ~2,300 lines) is the Phase 4b/4c/4d work that remains.
+
+#### Deprecated import paths
+
+The old ``papertrade_india.<module>`` paths still work for now but emit
+a ``DeprecationWarning`` pointing at the new home. Update imports to
+the new locations; the shim modules will be removed in v0.3.
+
+| Old path | New path |
+|:---|:---|
+| ``papertrade_india.models`` | ``papertrade_india.domain.models`` |
+| ``papertrade_india.exceptions`` | ``papertrade_india.domain.exceptions`` |
+| ``papertrade_india.risk`` | ``papertrade_india.domain.rules.risk`` |
+| ``papertrade_india.microstructure`` (validators) | ``papertrade_india.domain.rules.tick_lot_band`` |
+| ``papertrade_india.microstructure`` (book sim) | ``papertrade_india.execution.book`` |
+| ``papertrade_india.slippage`` | ``papertrade_india.execution.slippage`` |
+| ``papertrade_india.fees`` | ``papertrade_india.execution.fees`` |
+| ``papertrade_india.settlement`` | ``papertrade_india.execution.settlement`` |
+| ``papertrade_india.simulation`` | ``papertrade_india.execution.simulation`` |
+| ``papertrade_india.partial_fills`` | ``papertrade_india.orders.partial_fills`` |
+| ``papertrade_india.preopen`` | ``papertrade_india.orders.preopen`` |
+| ``papertrade_india.limit_orders`` | ``papertrade_india.workers.limit_orders`` |
+| ``papertrade_india.persistence`` | ``papertrade_india.infrastructure.persistence`` |
+| ``papertrade_india.migrations`` | ``papertrade_india.infrastructure.migrations`` |
+| ``papertrade_india.idempotency`` | ``papertrade_india.infrastructure.idempotency`` |
+| ``papertrade_india.ledger`` | ``papertrade_india.infrastructure.ledger`` |
+| ``papertrade_india.events`` | ``papertrade_india.infrastructure.events`` |
+| ``papertrade_india.observability`` | ``papertrade_india.infrastructure.observability`` |
+| ``papertrade_india.clock`` | ``papertrade_india.infrastructure.clock`` |
+| ``papertrade_india.market_hours`` | ``papertrade_india.infrastructure.market_hours`` |
+| ``papertrade_india.symbols`` | ``papertrade_india.infrastructure.symbols`` |
+
+The umbrella ``papertrade_india`` re-exports stay unchanged: ``from
+papertrade_india import IndiaPaperBroker, Position, Order, ...``
+continues to work.
+
+### Added (Tier-B/C: 1.0 readiness)
+
+#### Versioned schema migrations (Tier-C, 1.0 blocker)
+- New `migrations.py` module with a `@migration(N)` decorator,
+  `MIGRATIONS` registry, and `run_migrations(conn)` runner.
+- A single `schema_version` table tracks the applied version per DB.
+  Brand-new DBs see no row and start at v0; legacy 0.1.x DBs (tables
+  present, no row) are detected and stamped at v1 without re-running.
+- Each migration runs in its own `BEGIN IMMEDIATE` transaction so a
+  failure leaves the previous state intact.
+- Forward-incompatibility guard: if a DB reports a higher version than
+  the package knows, `run_migrations` raises `RuntimeError` rather than
+  risking corruption.
+- `papertrade-india migrate --db PATH` CLI command for pre-deploy /
+  recovery use.
+- Decorator validates positive versions and rejects duplicates loudly
+  so a future double-PR collision can't silently overwrite.
+- The pre-existing `Persistence.SCHEMA` and `EXTENSION_SCHEMAS`
+  symbols are now thin re-exports that point at the migrations module
+  for backwards compatibility.
+
+This is the 1.0 blocker called out in the suggestion review: any future
+schema change can now ship as a v2/v3/... migration and existing 0.1
+users get the new columns automatically on first connect after upgrade.
+
+#### Cookbook (Tier-B)
+- New `docs/COOKBOOK.md` with 15 task-oriented recipes covering
+  contract-note reconciliation, replay backtests, Jupyter usage,
+  mid-year fee changes, autonomous-agent safety, OTel/Prometheus
+  wiring, multi-account, and migrations.
+
+### Tests
+- 12 new tests covering fresh DB at head, legacy detection,
+  forward-incompatibility, decorator validation, and the migrate CLI.
+- Total: **317 passing**, 3 opt-in E2E skipped.
+
+### Pushed back on (with reasons)
+- **Tier-C `account.cash` integer paise** — the cash-invariant fuzz
+  test (200 random ops, exact match within ₹0.01) has held since Tier 2
+  with float math. No evidence of drift biting in practice. Switching
+  to integer paise touches ~15 files and forces re-validation of every
+  fee calculation, for a problem nobody has yet. Document as "if/when"
+  in the limitations section.
+- **Tier-C `PriceFeed.subscribe()` for streaming** — speculative.
+  No streaming data source to test against. The `PriceProvider`
+  Protocol already accepts any `get_price` impl; a future streaming
+  provider can wrap a stream into pull-based polling without breaking
+  the API.
+
 ### Added (Tier-A: completing the package)
 
 #### Backtest replay mode
