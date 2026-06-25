@@ -22,7 +22,7 @@ PRESETS dict at the bottom is for the CLI / configuration loaders.
 
 from __future__ import annotations
 
-from .fees import FeeConfig
+from .execution.fees import FeeConfig
 
 # ── Zerodha ────────────────────────────────────────────────────────────
 

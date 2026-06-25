@@ -25,10 +25,10 @@ Public API
 """
 
 from .broker import IndiaPaperBroker
-from .clock import Clock, ReplayClock, WallClock
+from .infrastructure.clock import Clock, ReplayClock, WallClock
 from .corporate_actions import CorporateAction
-from .events import Event
-from .exceptions import (
+from .infrastructure.events import Event
+from .domain.exceptions import (
     AccountNotFoundError,
     AMOWindowClosedError,
     IdempotencyConflict,
@@ -51,19 +51,21 @@ from .exceptions import (
     SymbolNotFound,
     TickSizeViolation,
 )
-from .fees import FeeBreakdown, FeeConfig, FeeSchedule, IndianFeeEngine
+from .execution.fees import FeeBreakdown, FeeConfig, FeeSchedule, IndianFeeEngine
 from .interface import BrokerInterface
-from .ledger import CashMovement
-from .limit_orders import LimitOrderWatcher
-from .market_hours import IST, NSECalendar, SessionPhase
-from .microstructure import (
+from .infrastructure.ledger import CashMovement
+from .workers.limit_orders import LimitOrderWatcher
+from .infrastructure.market_hours import IST, NSECalendar, SessionPhase
+from .domain.rules.tick_lot_band import (
     MicrostructureConfig,
+    round_to_tick,
+)
+from .execution.book import (
     OrderBook,
     OrderBookConfig,
     OrderBookSimulator,
-    round_to_tick,
 )
-from .models import (
+from .domain.models import (
     Account,
     Exchange,
     Order,
@@ -75,9 +77,9 @@ from .models import (
     TimeInForce,
     Trade,
 )
-from .observability import BrokerEvent, EventBus, stdlib_log_subscriber
-from .partial_fills import PartialFillConfig
-from .preopen import AuctionMatch, compute_equilibrium
+from .infrastructure.observability import BrokerEvent, EventBus, stdlib_log_subscriber
+from .orders.partial_fills import PartialFillConfig
+from .orders.preopen import AuctionMatch, compute_equilibrium
 from .price_feed import (
     CachedLastKnownProvider,
     JugaadDataProvider,
@@ -103,22 +105,22 @@ from .providers import (
     default_registry,
 )
 from .quickstart import quickstart
-from .risk import RiskConfig, RiskContext, RiskEngine
-from .settlement import (
+from .domain.rules.risk import RiskConfig, RiskContext, RiskEngine
+from .execution.settlement import (
     PendingSettlement,
     SettlementConfig,
     SettlementEngine,
     SettlementMode,
 )
-from .simulation import (
+from .execution.simulation import (
     LatencyConfig,
     LatencySimulator,
     RejectionConfig,
     RejectionSimulator,
     RejectScenario,
 )
-from .slippage import SlippageConfig, apply_slippage
-from .symbols import SymbolEntry, SymbolMaster
+from .execution.slippage import SlippageConfig, apply_slippage
+from .infrastructure.symbols import SymbolEntry, SymbolMaster
 
 __all__ = [
     # Core

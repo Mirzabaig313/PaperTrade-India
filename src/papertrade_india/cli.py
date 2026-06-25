@@ -33,8 +33,8 @@ except ImportError:  # pragma: no cover
     raise
 
 from .broker import IndiaPaperBroker
-from .exceptions import AccountNotFoundError
-from .models import OrderStatus
+from .domain.exceptions import AccountNotFoundError
+from .domain.models import OrderStatus
 
 app = typer.Typer(
     name="papertrade-india",

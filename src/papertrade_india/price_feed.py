@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
-from .exceptions import PriceUnavailableError
+from .domain.exceptions import PriceUnavailableError
 from .providers import (
     CachedLastKnownProvider,
     InMemoryShortCache,

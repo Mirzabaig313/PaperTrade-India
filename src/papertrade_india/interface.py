@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from .models import Account, Order, OrderStatus, OrderType, Position
+from .domain.models import Account, Order, OrderStatus, OrderType, Position
 
 
 class BrokerInterface(ABC):

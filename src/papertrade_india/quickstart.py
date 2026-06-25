@@ -37,13 +37,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from .broker import IndiaPaperBroker
-from .fees import FeeConfig, FeeSchedule
-from .models import Exchange
-from .persistence import PathLike
+from .execution.fees import FeeConfig, FeeSchedule
+from .domain.models import Exchange
+from .infrastructure.persistence import PathLike
 from .presets import ZERODHA_DELIVERY
-from .risk import RiskConfig
-from .slippage import SlippageConfig
-from .symbols import SymbolMaster
+from .domain.rules.risk import RiskConfig
+from .execution.slippage import SlippageConfig
+from .infrastructure.symbols import SymbolMaster
 
 
 def quickstart(
