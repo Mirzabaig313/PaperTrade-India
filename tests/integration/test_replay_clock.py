@@ -155,7 +155,7 @@ def test_idempotency_keys_clean_up_against_replay_clock(
 ):
     """Idempotency cleanup uses ``cleanup_expired(now=...)`` — for
     backtests we want the cleanup to honor replay time."""
-    from papertrade_india import idempotency as _idempotency
+    from papertrade_india.infrastructure import idempotency as _idempotency
 
     clock = ReplayClock(datetime(2026, 5, 19, 12, 0, tzinfo=IST))
     broker = _make_broker(

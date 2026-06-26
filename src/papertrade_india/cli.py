@@ -442,7 +442,11 @@ def migrate(
     """
     import sqlite3
 
-    from .migrations import applied_version, current_version, run_migrations
+    from .infrastructure.migrations import (
+        applied_version,
+        current_version,
+        run_migrations,
+    )
 
     raw = sqlite3.connect(db)
     raw.row_factory = sqlite3.Row

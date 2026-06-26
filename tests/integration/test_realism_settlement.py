@@ -13,7 +13,7 @@ from papertrade_india import (
     SettlementConfig,
     SettlementMode,
 )
-from papertrade_india.clock import ReplayClock
+from papertrade_india.infrastructure.clock import ReplayClock
 
 
 @pytest.fixture()

@@ -231,7 +231,7 @@ class TestOrderBookImpact:
         assert order.filled_avg_price < 2500.25
 
     def test_queue_position_tracked_for_limits(self, tmp_path) -> None:
-        from papertrade_india.models import OrderSide, OrderType
+        from papertrade_india.domain.models import OrderSide, OrderType
         quotes = {
             "RELIANCE": MarketQuote(
                 last=2500.0, timestamp=datetime.now(),

@@ -12,13 +12,13 @@ from papertrade_india import (
     TickSizeViolation,
     round_to_tick,
 )
-from papertrade_india.microstructure import (
+from papertrade_india.domain.models import OrderSide
+from papertrade_india.domain.rules.tick_lot_band import (
     is_aligned_to_tick,
     validate_band,
     validate_lot,
     validate_tick,
 )
-from papertrade_india.models import OrderSide
 
 # ── Tick alignment ──────────────────────────────────────────────────
 

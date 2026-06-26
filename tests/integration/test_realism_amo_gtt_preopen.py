@@ -17,8 +17,8 @@ from papertrade_india import (
     SettlementConfig,
     SettlementMode,
 )
-from papertrade_india.clock import ReplayClock
-from papertrade_india.market_hours import IST
+from papertrade_india.infrastructure.clock import ReplayClock
+from papertrade_india.infrastructure.market_hours import IST
 
 
 def _broker_with_clock(tmp_path, price_feed, clock):

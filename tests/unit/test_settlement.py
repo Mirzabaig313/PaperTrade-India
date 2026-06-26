@@ -12,7 +12,7 @@ from papertrade_india import (
     SettlementEngine,
     SettlementMode,
 )
-from papertrade_india.settlement import (
+from papertrade_india.execution.settlement import (
     SETTLEMENT_TABLE_SQL,
     _next_business_day,
 )

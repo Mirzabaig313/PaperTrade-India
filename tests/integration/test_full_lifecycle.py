@@ -500,7 +500,7 @@ def test_cancel_during_limit_fill_does_not_double_apply(broker, stub_provider):
     transaction (rolling back the apply_buy/apply_sell changes).
     """
     from papertrade_india import LimitOrderWatcher
-    from papertrade_india.exceptions import OrderNoLongerPending
+    from papertrade_india.domain.exceptions import OrderNoLongerPending
 
     order = broker.buy(
         "RELIANCE", 5,
@@ -536,7 +536,7 @@ def test_position_marks_stale_when_feed_fails(broker, stub_provider, monkeypatch
     broker.buy("RELIANCE", 5)
 
     # Tear down the feed so subsequent calls raise.
-    from papertrade_india.exceptions import PriceUnavailableError
+    from papertrade_india.domain.exceptions import PriceUnavailableError
 
     def boom(symbol):
         raise PriceUnavailableError("simulated outage")

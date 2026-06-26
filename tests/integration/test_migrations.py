@@ -18,7 +18,7 @@ import sqlite3
 import pytest
 
 from papertrade_india import IndiaPaperBroker, PriceFeed
-from papertrade_india.migrations import (
+from papertrade_india.infrastructure.migrations import (
     MIGRATIONS,
     applied_version,
     current_version,
