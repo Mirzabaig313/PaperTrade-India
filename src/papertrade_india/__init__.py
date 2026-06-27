@@ -102,6 +102,7 @@ from .price_feed import (
     PriceProvider,
     Quote,
     YFinanceProvider,
+    resilient_feed,
 )
 from .providers import (
     OHLCV,
@@ -157,6 +158,7 @@ __all__ = [
     "PriceProvider",
     "Quote",
     "YFinanceProvider",
+    "resilient_feed",
     # New provider system
     "MarketDataProvider",
     "MarketQuote",

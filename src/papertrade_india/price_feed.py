@@ -266,3 +266,49 @@ class PriceFeed:
 # ``time`` is only used to keep the legacy import surface stable for any
 # downstream that imported the module with ``import time``-side effects.
 _ = time
+
+
+def resilient_feed(
+    providers: list[PriceProvider | MarketDataProvider],
+    *,
+    wrap_circuit_breaker: bool = True,
+    **feed_kwargs: object,
+) -> PriceFeed:
+    """Build a multi-provider :class:`PriceFeed` tuned for "use all sources".
+
+    The chain is consumed first-wins (lowest latency — returns the first
+    live quote and short-circuits), so ordering matters: put the
+    highest-fidelity real-time feeds first, delayed/EOD sources last,
+    e.g. ``[upstox, dhan, finnhub, yfinance]``.
+
+    With ``wrap_circuit_breaker=True`` (default) every new-style
+    :class:`MarketDataProvider` is wrapped in a
+    :class:`~papertrade_india.providers.CircuitBreakerProvider`, so a
+    source that starts failing or lagging is ejected automatically and
+    probed back when it recovers — this is what keeps data quality
+    stable over time without adding per-quote latency. Inspect
+    ``feed.providers[i].health`` for the breaker state.
+
+    Legacy ``get_price`` providers are passed through unwrapped (the
+    breaker wraps the new ABC only); they still benefit from PriceFeed's
+    built-in short + long caches.
+
+    ``ponytail``: deliberately first-wins, not median. Median consensus
+    would make every fill wait for the slowest provider — the opposite
+    of the low-lag goal. Cross-source validation belongs in a background
+    audit, not the hot fill path.
+    """
+    chain: list[PriceProvider | MarketDataProvider] = []
+    if wrap_circuit_breaker:
+        from .providers import CircuitBreakerProvider  # noqa: PLC0415
+
+        for p in providers:
+            if isinstance(p, MarketDataProvider) and not isinstance(
+                p, CircuitBreakerProvider
+            ):
+                chain.append(CircuitBreakerProvider(p))
+            else:
+                chain.append(p)
+    else:
+        chain = list(providers)
+    return PriceFeed(providers=chain, **feed_kwargs)  # type: ignore[arg-type]

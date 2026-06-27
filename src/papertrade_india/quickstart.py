@@ -35,15 +35,19 @@ Pass overrides to specialize::
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .broker import IndiaPaperBroker
-from .execution.fees import FeeConfig, FeeSchedule
 from .domain.models import Exchange
-from .infrastructure.persistence import PathLike
-from .presets import ZERODHA_DELIVERY
 from .domain.rules.risk import RiskConfig
+from .execution.fees import FeeConfig, FeeSchedule
 from .execution.slippage import SlippageConfig
+from .infrastructure.persistence import PathLike
 from .infrastructure.symbols import SymbolMaster
+from .presets import ZERODHA_DELIVERY
+
+if TYPE_CHECKING:
+    from .price_feed import PriceFeed
 
 
 def quickstart(
@@ -57,6 +61,7 @@ def quickstart(
     symbol_master: SymbolMaster | None = "load-bundled-nse",
     enforce_market_hours: bool = True,
     enforce_fresh_prices: bool = True,
+    price_feed: PriceFeed | None = None,
 ) -> IndiaPaperBroker:
     """Construct an opinionated, safe-by-default broker.
 
@@ -90,6 +95,7 @@ def quickstart(
         symbol_master=sm,
         enforce_market_hours=enforce_market_hours,
         enforce_fresh_prices=enforce_fresh_prices,
+        price_feed=price_feed,
     )
 
     # Load the NSE-30 sample into the master if we constructed one.

@@ -110,9 +110,7 @@ def _runtime_internal_targets(path: Path) -> list[tuple[str, int]]:
     def is_type_checking(node: ast.expr) -> bool:
         if isinstance(node, ast.Name) and node.id == "TYPE_CHECKING":
             return True
-        if isinstance(node, ast.Attribute) and node.attr == "TYPE_CHECKING":
-            return True
-        return False
+        return isinstance(node, ast.Attribute) and node.attr == "TYPE_CHECKING"
 
     def visit(body: list[ast.stmt]) -> None:
         for node in body:
