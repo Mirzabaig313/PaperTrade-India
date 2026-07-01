@@ -118,6 +118,11 @@ class UpstoxProvider(MarketDataProvider):
         if self._resolve is not None:
             try:
                 return self._resolve(sym, self._segment)
+            except ProviderError:
+                # A resolver outage (e.g. instrument-master download
+                # failed) is a provider failure, not "unknown symbol" —
+                # let it propagate so the feed logs it and falls back.
+                raise
             except Exception as e:  # noqa: BLE001
                 logger.debug("upstox resolve failed for %s: %s", sym, e)
                 return None
@@ -154,7 +159,8 @@ class UpstoxProvider(MarketDataProvider):
         )
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # noqa: S310
-                body = resp.read().decode("utf-8", errors="replace")
+                # Cap the read — a single quote response is a few KB.
+                body = resp.read(4 * 1024 * 1024).decode("utf-8", errors="replace")
         except HTTPError as e:
             if e.code in (401, 403):
                 raise ProviderError(f"upstox auth failed (HTTP {e.code})") from e
@@ -165,7 +171,7 @@ class UpstoxProvider(MarketDataProvider):
         try:
             payload = json.loads(body)
         except json.JSONDecodeError as e:
-            raise ProviderError(f"upstox non-JSON: {body[:200]}") from e
+            raise ProviderError("upstox returned non-JSON response") from e
 
         data = _extract(payload, instrument_key, symbol)
         if not data:

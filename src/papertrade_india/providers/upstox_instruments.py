@@ -24,9 +24,13 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+import os
 import time
 import urllib.request
 from pathlib import Path
+from urllib.error import URLError
+
+from .base import ProviderError
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,10 @@ _NSE_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json
 _DEFAULT_CACHE = Path("data/upstox_nse_instruments.json.gz")
 # Cloudflare bans the default Python-urllib UA (see UpstoxProvider).
 _UA = "papertrade-india/0.1 (+https://github.com/your-org/papertrade-india)"
+# Guards against a compromised/swapped endpoint sending a huge payload
+# (decompression bomb / OOM). The real NSE file is ~2.3 MB gzipped.
+_MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024      # 64 MB compressed ceiling
+_MAX_DECOMPRESSED_BYTES = 512 * 1024 * 1024  # 512 MB decompressed ceiling
 
 
 class UpstoxInstrumentMaster:
@@ -103,10 +111,23 @@ class UpstoxInstrumentMaster:
 
     def _load_records(self) -> list[dict]:
         raw = self._read_cache()
-        if raw is None:
-            raw = self._download()
-            self._write_cache(raw)
-        return json.loads(gzip.decompress(raw))
+        if raw is not None:
+            try:
+                return self._decode(raw)
+            except (gzip.BadGzipFile, EOFError, OSError, json.JSONDecodeError) as e:
+                # Cache is truncated/corrupt (e.g. crash mid-write) —
+                # discard it and re-download rather than wedging resolve().
+                logger.warning("Corrupt instrument cache (%s); re-downloading", e)
+        raw = self._download()
+        self._write_cache(raw)
+        return self._decode(raw)
+
+    @staticmethod
+    def _decode(raw: bytes) -> list[dict]:
+        data = gzip.decompress(raw)
+        if len(data) > _MAX_DECOMPRESSED_BYTES:
+            raise ProviderError("instrument master exceeds size limit")
+        return json.loads(data)
 
     def _read_cache(self) -> bytes | None:
         p = self._cache_path
@@ -119,9 +140,13 @@ class UpstoxInstrumentMaster:
         return p.read_bytes()
 
     def _write_cache(self, raw: bytes) -> None:
+        # Atomic write: temp file in the same dir + os.replace, so a
+        # crash mid-write never leaves a truncated cache behind.
         try:
             self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self._cache_path.write_bytes(raw)
+            tmp = self._cache_path.with_suffix(self._cache_path.suffix + f".tmp.{os.getpid()}")
+            tmp.write_bytes(raw)
+            os.replace(tmp, self._cache_path)
         except OSError as e:  # cache is best-effort
             logger.warning("Could not write instrument cache: %s", e)
 
@@ -130,8 +155,17 @@ class UpstoxInstrumentMaster:
         req = urllib.request.Request(  # noqa: S310
             self._url, headers={"User-Agent": _UA, "Accept-Encoding": "gzip"}
         )
-        with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310
-            return resp.read()
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310
+                raw = resp.read(_MAX_DOWNLOAD_BYTES + 1)
+        except (URLError, TimeoutError, OSError) as e:
+            # Surface as ProviderError so the price-feed chain treats it
+            # as a provider outage (→ falls back to the next provider,
+            # and it's logged) rather than a silent "unknown symbol".
+            raise ProviderError(f"instrument master download failed: {e}") from e
+        if len(raw) > _MAX_DOWNLOAD_BYTES:
+            raise ProviderError("instrument master exceeds download size limit")
+        return raw
 
 
 __all__ = ["UpstoxInstrumentMaster"]

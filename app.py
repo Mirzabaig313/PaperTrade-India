@@ -90,19 +90,23 @@ def load_watchlist() -> list[str]:
             data = json.loads(_WATCHLIST_PATH.read_text())
             if isinstance(data, list):
                 return [str(s).upper() for s in data if str(s).strip()]
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             pass
     return list(_DEFAULT_WATCHLIST)
 
 
 def save_watchlist(symbols: list[str]) -> None:
-    clean = []
+    clean: list[str] = []
     for s in symbols:
         s = str(s).strip().upper()
         if s and s not in clean:
             clean.append(s)
     _WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _WATCHLIST_PATH.write_text(json.dumps(clean, indent=2))
+    # Atomic write: temp file + os.replace so a crash mid-write can't
+    # truncate the watchlist (which would silently reset it on load).
+    tmp = _WATCHLIST_PATH.with_suffix(f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(clean, indent=2))
+    os.replace(tmp, _WATCHLIST_PATH)
 
 
 # ── Self-check (python app.py --check) — no streamlit ─────────────────
@@ -149,10 +153,12 @@ broker = _broker()
 
 
 def _quote(symbol: str):
-    """Best-effort live quote; returns MarketQuote or None."""
+    """Best-effort live quote; returns MarketQuote or None (logged)."""
     try:
         return broker.price_feed.get_market_quote(symbol)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger("app").debug("quote failed for %s: %s", symbol, e)
         return None
 
 

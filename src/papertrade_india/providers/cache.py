@@ -38,28 +38,34 @@ class InMemoryShortCache:
 
     def __init__(self, ttl_seconds: float = 5.0) -> None:
         self._ttl = float(ttl_seconds)
-        self._data: dict[str, tuple[float, float]] = {}
+        # symbol -> (price, wall_time, is_real_time)
+        self._data: dict[str, tuple[float, float, bool]] = {}
         self._lock = RLock()
 
     @property
     def ttl_seconds(self) -> float:
         return self._ttl
 
-    def get(self, symbol: str) -> tuple[float, float] | None:
-        """Return ``(price, monotonic_t)`` if fresh, else ``None``."""
+    def get(self, symbol: str) -> tuple[float, float, bool] | None:
+        """Return ``(price, wall_t, is_real_time)`` if fresh, else ``None``."""
         with self._lock:
             entry = self._data.get(symbol)
             if entry is None:
                 return None
-            price, t = entry
+            price, t, is_real_time = entry
             if (time.time() - t) >= self._ttl:
                 return None
-            return price, t
+            return price, t, is_real_time
 
-    def put(self, symbol: str, price: float) -> None:
-        """Store the latest price for ``symbol`` keyed on wall-clock time."""
+    def put(self, symbol: str, price: float, is_real_time: bool = True) -> None:
+        """Store the latest price + its real-time provenance.
+
+        ``is_real_time`` is carried so a cache hit can't launder a
+        delayed quote into a real-time one (which would defeat the
+        broker's ``enforce_real_time`` guard).
+        """
         with self._lock:
-            self._data[symbol] = (price, time.time())
+            self._data[symbol] = (price, time.time(), is_real_time)
 
     def clear(self) -> None:
         """Drop everything (test helper)."""

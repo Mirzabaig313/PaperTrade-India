@@ -212,7 +212,7 @@ class _FakeResponse:
     def __exit__(self, *exc: object) -> None:
         pass
 
-    def read(self) -> bytes:
+    def read(self, *_a: object) -> bytes:
         return self._body
 
 

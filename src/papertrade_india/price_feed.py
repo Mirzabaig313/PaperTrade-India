@@ -142,23 +142,25 @@ class PriceFeed:
         the long-lived cache. Always returns a :class:`Quote` or raises
         :class:`PriceUnavailableError` — never silently degrades.
         """
-        # Short cache check — counts as fresh, source = "short_cache".
+        # Short cache check — preserves the cached quote's real-time
+        # provenance so a delayed feed can't be laundered into a
+        # real-time hit (which would defeat enforce_real_time).
         cached = self._short_cache.get(symbol)
         if cached is not None:
-            price, t = cached
+            price, t, is_real_time = cached
             return Quote(
                 price=price,
                 source="short_cache",
                 fetched_at=datetime.fromtimestamp(t),
                 is_stale=False,
-                is_real_time=True,
+                is_real_time=is_real_time,
             )
 
         for provider in self.providers:
             quote = self._call_provider(provider, symbol)
             if quote is not None:
                 self.cache.update(symbol, quote.last)
-                self._short_cache.put(symbol, quote.last)
+                self._short_cache.put(symbol, quote.last, quote.is_real_time)
                 # Quote.is_stale historically means "served from the
                 # long cache", *not* "delayed feed". A live yfinance
                 # quote is delayed but not stale in this sense.
@@ -252,7 +254,7 @@ class PriceFeed:
             quote = self._call_provider(provider, symbol)
             if quote is not None:
                 self.cache.update(symbol, quote.last)
-                self._short_cache.put(symbol, quote.last)
+                self._short_cache.put(symbol, quote.last, quote.is_real_time)
                 return quote
         cached_quote = self.cache.get_quote(symbol)
         if cached_quote is not None:

@@ -67,8 +67,12 @@ class Persistence:
                 check_same_thread=True,
             )
             conn.row_factory = sqlite3.Row
-            # Each thread needs its own foreign-key/WAL settings.
+            # Each thread needs its own foreign-key setting. busy_timeout
+            # makes a concurrent writer WAIT for the lock (up to 5s)
+            # instead of failing immediately with "database is locked" —
+            # important once multiple UI sessions share one broker.
             conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("PRAGMA busy_timeout = 5000")
             self._local.conn = conn
         return conn
 

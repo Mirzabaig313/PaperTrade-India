@@ -5,7 +5,13 @@ Inject a records list so there's no network/cache I/O.
 
 from __future__ import annotations
 
-from papertrade_india.providers import UpstoxInstrumentMaster, UpstoxProvider
+import pytest
+
+from papertrade_india.providers import (
+    ProviderError,
+    UpstoxInstrumentMaster,
+    UpstoxProvider,
+)
 
 _RECORDS = [
     {"segment": "NSE_EQ", "instrument_type": "EQ",
@@ -59,3 +65,31 @@ def test_wires_into_upstox_provider_resolver() -> None:
     # checking the private resolver path returns the expected key.
     assert p._instrument_key("RELIANCE") == "NSE_EQ|INE002A01018"
     assert p._instrument_key("NOSUCH") is None
+
+
+def test_corrupt_cache_triggers_redownload(tmp_path, monkeypatch) -> None:
+    import gzip
+    import json as _json
+
+    cache = tmp_path / "instr.json.gz"
+    cache.write_bytes(b"not a valid gzip file")  # simulate truncated cache
+
+    m = UpstoxInstrumentMaster(cache_path=cache)
+    good = gzip.compress(_json.dumps(_RECORDS).encode())
+    monkeypatch.setattr(m, "_download", lambda: good)
+
+    # Corrupt cache must be discarded and re-downloaded, not wedge resolve.
+    assert m.resolve("RELIANCE") == "NSE_EQ|INE002A01018"
+    # And the cache is now repaired (valid gz written atomically).
+    assert cache.read_bytes() == good
+
+
+def test_resolver_outage_propagates_as_provider_error() -> None:
+    # A resolver that raises ProviderError (e.g. download failed) must
+    # propagate through UpstoxProvider — NOT be swallowed as "unknown".
+    def _boom(_sym, _seg):
+        raise ProviderError("instrument master download failed")
+
+    p = UpstoxProvider(access_token="X", resolve=_boom)
+    with pytest.raises(ProviderError, match="download failed"):
+        p._instrument_key("RELIANCE")
