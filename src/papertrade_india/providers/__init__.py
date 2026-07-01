@@ -84,6 +84,8 @@ try:
 except Exception:  # noqa: BLE001
     UpstoxProvider = None  # type: ignore[assignment]
 
+from .upstox_instruments import UpstoxInstrumentMaster
+
 
 __all__ = [
     # Base interface
@@ -118,4 +120,5 @@ __all__ = [
     "KiteProvider",
     "DhanProvider",
     "UpstoxProvider",
+    "UpstoxInstrumentMaster",
 ]

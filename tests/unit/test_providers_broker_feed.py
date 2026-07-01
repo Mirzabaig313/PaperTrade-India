@@ -259,6 +259,27 @@ def test_upstox_parses_quote_with_depth(monkeypatch: pytest.MonkeyPatch) -> None
     assert q.is_real_time is True
 
 
+def test_upstox_sends_non_default_user_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression: Upstox sits behind Cloudflare, which bans the default
+    # Python-urllib User-Agent (Error 1010) before auth is evaluated.
+    captured = {}
+
+    def _capture(req, *a, **kw):
+        captured["ua"] = req.get_header("User-agent")
+        return _FakeResponse(_UPSTOX_BODY)
+
+    monkeypatch.setattr(
+        "papertrade_india.providers.upstox.urllib.request.urlopen", _capture,
+    )
+    p = UpstoxProvider(
+        access_token="X",
+        instrument_key_map={"RELIANCE": "NSE_EQ|INE002A01018"},
+    )
+    p.get_quote("RELIANCE")
+    assert captured["ua"] is not None
+    assert "urllib" not in captured["ua"].lower()
+
+
 def test_upstox_missing_token_raises() -> None:
     p = UpstoxProvider(
         access_token=None,
