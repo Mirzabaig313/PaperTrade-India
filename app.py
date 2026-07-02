@@ -25,7 +25,6 @@ Notes
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -36,7 +35,6 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 _DB_PATH = _ROOT / "data" / "india_paper_ui.db"
-_WATCHLIST_PATH = _ROOT / "data" / "ui_watchlist.json"
 _DEFAULT_WATCHLIST = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]
 
 
@@ -82,31 +80,12 @@ def make_broker():
     )
 
 
-# ── Watchlist persistence ─────────────────────────────────────────────
+# ── Watchlist: SQLite-backed (via the broker) ─────────────────────────
 
-def load_watchlist() -> list[str]:
-    if _WATCHLIST_PATH.exists():
-        try:
-            data = json.loads(_WATCHLIST_PATH.read_text())
-            if isinstance(data, list):
-                return [str(s).upper() for s in data if str(s).strip()]
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-            pass
-    return list(_DEFAULT_WATCHLIST)
-
-
-def save_watchlist(symbols: list[str]) -> None:
-    clean: list[str] = []
-    for s in symbols:
-        s = str(s).strip().upper()
-        if s and s not in clean:
-            clean.append(s)
-    _WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    # Atomic write: temp file + os.replace so a crash mid-write can't
-    # truncate the watchlist (which would silently reset it on load).
-    tmp = _WATCHLIST_PATH.with_suffix(f".tmp.{os.getpid()}")
-    tmp.write_text(json.dumps(clean, indent=2))
-    os.replace(tmp, _WATCHLIST_PATH)
+def seed_watchlist(broker) -> None:
+    """Seed the default watchlist on an empty (first-run) DB."""
+    if not broker.get_watchlist():
+        broker.set_watchlist(_DEFAULT_WATCHLIST)
 
 
 # ── Self-check (python app.py --check) — no streamlit ─────────────────
@@ -121,8 +100,8 @@ def _self_check() -> None:
     assert order.status in (
         OrderStatus.FILLED, OrderStatus.PENDING, OrderStatus.REJECTED,
     ), f"unexpected status {order.status}"
-    save_watchlist(_DEFAULT_WATCHLIST)
-    assert load_watchlist(), "watchlist round-trip failed"
+    broker.set_watchlist(_DEFAULT_WATCHLIST)
+    assert broker.get_watchlist(), "watchlist round-trip failed"
     print("self-check OK:")
     print(f"  equity={acct.equity:.2f} cash={acct.cash:.2f}")
     print(f"  order {order.id[:8]}: {order.status.value} "
@@ -150,6 +129,7 @@ def _broker():
 
 
 broker = _broker()
+seed_watchlist(broker)
 
 
 def _quote(symbol: str):
@@ -214,7 +194,7 @@ with tab_dash:
     if st.button("Refresh prices"):
         st.rerun()
     rows = []
-    for sym in load_watchlist():
+    for sym in broker.get_watchlist():
         q = _quote(sym)
         rows.append({
             "Symbol": sym,
@@ -230,7 +210,7 @@ with tab_dash:
 # ── Trade ─────────────────────────────────────────────────────────────
 with tab_trade:
     st.subheader("Order ticket")
-    wl = load_watchlist()
+    wl = broker.get_watchlist()
     pick = st.selectbox("Symbol (from watchlist)", ["— type below —", *wl])
     typed = st.text_input("…or type any NSE symbol", value="").strip().upper()
     symbol = typed or (pick if pick != "— type below —" else "")
@@ -280,7 +260,7 @@ with tab_watch:
         "Add a row and type any NSE symbol. Saved symbols appear in the "
         "Dashboard price board and the Trade dropdown."
     )
-    current = load_watchlist()
+    current = broker.get_watchlist()
     edited = st.data_editor(
         [{"Symbol": s} for s in current],
         num_rows="dynamic",
@@ -290,7 +270,7 @@ with tab_watch:
     )
     if st.button("Save watchlist", type="primary"):
         syms = [r.get("Symbol", "") for r in edited]
-        save_watchlist(syms)
+        broker.set_watchlist(syms)
         st.success("Watchlist saved.")
         st.rerun()
 

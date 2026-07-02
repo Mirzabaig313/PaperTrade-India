@@ -272,6 +272,33 @@ def _v3_bonus_and_rights(conn: sqlite3.Connection) -> None:
     )
 
 
+# ── Migration 004: UI watchlist ────────────────────────────────────────
+
+
+@migration(4)
+def _v4_watchlist(conn: sqlite3.Connection) -> None:
+    """A simple, ordered favorites list for the UI.
+
+    Global (not per-account) — it's a display convenience, not trading
+    state, matching the tool's single-user design. ``position`` keeps the
+    user's ordering; ``symbol`` is the primary key so re-adding is a
+    no-op/upsert.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS watchlist (
+            symbol TEXT PRIMARY KEY,
+            position INTEGER NOT NULL DEFAULT 0,
+            added_at TEXT NOT NULL
+        )
+        """,
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_watchlist_position "
+        "ON watchlist(position)",
+    )
+
+
 # ── Public API ─────────────────────────────────────────────────────────
 
 

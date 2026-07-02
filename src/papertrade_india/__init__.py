@@ -92,6 +92,7 @@ from .infrastructure.ledger import CashMovement
 from .infrastructure.market_hours import IST, NSECalendar, SessionPhase
 from .infrastructure.observability import BrokerEvent, EventBus, stdlib_log_subscriber
 from .infrastructure.symbols import SymbolEntry, SymbolMaster
+from .infrastructure.watchlist import WatchlistStore
 from .interface import BrokerInterface
 from .orders.partial_fills import PartialFillConfig
 from .orders.preopen import AuctionMatch, compute_equilibrium
@@ -187,6 +188,7 @@ __all__ = [
     "RiskEngine",
     "SymbolMaster",
     "SymbolEntry",
+    "WatchlistStore",
     # Tier-2: ledger / corporate actions
     "CashMovement",
     "CorporateAction",

@@ -62,6 +62,7 @@ from .infrastructure.market_hours import NSECalendar, SessionPhase
 from .infrastructure.observability import BrokerEvent, EventBus
 from .infrastructure.persistence import PathLike, Persistence
 from .infrastructure.symbols import SymbolMaster
+from .infrastructure.watchlist import WatchlistStore
 from .interface import BrokerInterface
 from .orders import amo as _amo
 from .orders import state as _orders_state
@@ -140,6 +141,7 @@ class IndiaPaperBroker(BrokerInterface):
         self.enforce_real_time = enforce_real_time
 
         self.persistence = Persistence(db_path)
+        self._watchlist = WatchlistStore(self.persistence)
         self.price_feed = price_feed or PriceFeed()
         self.calendar = calendar or NSECalendar()
 
@@ -325,6 +327,21 @@ class IndiaPaperBroker(BrokerInterface):
 
     def get_order(self, order_id: str) -> Order | None:
         return _reads_orders.get(self, order_id)
+
+    # ── Public API: watchlist (UI favorites, SQLite-backed) ────────────
+    def get_watchlist(self) -> list[str]:
+        """Return the saved watchlist symbols in user order."""
+        return self._watchlist.list_symbols()
+
+    def set_watchlist(self, symbols: list[str]) -> list[str]:
+        """Replace the watchlist with ``symbols``; returns the stored list."""
+        return self._watchlist.set_symbols(symbols)
+
+    def add_to_watchlist(self, symbol: str) -> None:
+        self._watchlist.add(symbol)
+
+    def remove_from_watchlist(self, symbol: str) -> None:
+        self._watchlist.remove(symbol)
 
     # ── Public API: order management ──────────────────────────────────
 

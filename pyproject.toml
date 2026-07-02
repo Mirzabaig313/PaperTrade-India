@@ -54,6 +54,11 @@ cli = [
     "rich>=13.7",
 ]
 
+# Local Streamlit UI for exercising the simulation (app.py)
+ui = [
+    "streamlit>=1.36",
+]
+
 # MCP server example (so any LLM agent can use the broker as a tool)
 mcp = [
     "fastmcp>=0.3",
