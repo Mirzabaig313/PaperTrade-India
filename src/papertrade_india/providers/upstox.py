@@ -201,6 +201,8 @@ class UpstoxProvider(MarketDataProvider):
             volume=_i(data.get("volume")),
             source="upstox",
             is_real_time=True,
+            bids=_ladder(data, "buy"),
+            asks=_ladder(data, "sell"),
         )
 
 
@@ -250,6 +252,24 @@ def _best(data: dict, side: str) -> tuple[float | None, int | None]:
         return (None, None)
     top = levels[0] or {}
     return (_f(top.get("price")), _i(top.get("quantity")))
+
+
+def _ladder(data: dict, side: str) -> tuple[tuple[float, int], ...] | None:
+    """All depth levels for ``side`` as best-first ``(price, size)`` pairs.
+
+    Upstox returns up to 5 levels under ``depth.buy`` / ``depth.sell``.
+    Returns ``None`` when depth is absent (e.g. a closed market with no
+    resting orders), so the book simulator falls back to synthesis.
+    """
+    depth = data.get("depth") or {}
+    levels = depth.get(side) or []
+    out: list[tuple[float, int]] = []
+    for lvl in levels:
+        price = _f((lvl or {}).get("price"))
+        if price is None:
+            continue
+        out.append((price, _i(lvl.get("quantity")) or 0))
+    return tuple(out) or None
 
 
 def _parse_ts(value: object) -> datetime | None:

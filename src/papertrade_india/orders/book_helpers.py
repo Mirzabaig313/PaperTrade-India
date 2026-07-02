@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def symbol_microstructure(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     symbol: str,
 ) -> tuple[float, int, float | None]:
     """Resolve (tick_size, lot_size, daily_band_pct) for ``symbol``.
@@ -43,7 +43,7 @@ def symbol_microstructure(
 
 
 def maybe_apply_book_impact(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     symbol: str,
     qty: float,
     side: OrderSide,
@@ -62,10 +62,17 @@ def maybe_apply_book_impact(
     if mq is None or mq.bid is None or mq.ask is None:
         return last_price
     tick, _, _ = symbol_microstructure(ctx, symbol)
-    book = ctx.book_sim.synthesize(
-        symbol=symbol, last=last_price, bid=mq.bid, ask=mq.ask,
-        adv=float(mq.volume) if mq.volume else None, tick_size=tick,
-    )
+    if mq.has_depth:
+        # Real provider depth (e.g. Upstox 5-level) — walk the true book.
+        book = ctx.book_sim.book_from_levels(
+            symbol=symbol, last=last_price,
+            bids=mq.bids, asks=mq.asks, tick_size=tick,
+        )
+    else:
+        book = ctx.book_sim.synthesize(
+            symbol=symbol, last=last_price, bid=mq.bid, ask=mq.ask,
+            adv=float(mq.volume) if mq.volume else None, tick_size=tick,
+        )
     fill = ctx.book_sim.walk_book(book, side, int(round(qty)))
     if fill.filled_qty == 0:
         return last_price
@@ -73,7 +80,7 @@ def maybe_apply_book_impact(
 
 
 def maybe_join_book_queue(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     symbol: str,
     side: OrderSide,
     limit_price: float,
@@ -88,10 +95,16 @@ def maybe_join_book_queue(
     except Exception:  # noqa: BLE001
         return
     tick, _, _ = symbol_microstructure(ctx, symbol)
-    book = ctx.book_sim.synthesize(
-        symbol=symbol, last=mq.last, bid=mq.bid, ask=mq.ask,
-        adv=float(mq.volume) if mq.volume else None, tick_size=tick,
-    )
+    if mq.has_depth:
+        book = ctx.book_sim.book_from_levels(
+            symbol=symbol, last=mq.last,
+            bids=mq.bids, asks=mq.asks, tick_size=tick,
+        )
+    else:
+        book = ctx.book_sim.synthesize(
+            symbol=symbol, last=mq.last, bid=mq.bid, ask=mq.ask,
+            adv=float(mq.volume) if mq.volume else None, tick_size=tick,
+        )
     ctx.book_sim.join_queue(symbol, side, limit_price, book)
 
 

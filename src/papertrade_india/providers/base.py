@@ -103,6 +103,17 @@ class MarketQuote:
     currency: str = "INR"
     source: str = "unknown"
     is_real_time: bool = False
+    # Full L2 depth ladders when the provider supplies them (best-first,
+    # each entry ``(price, size)``). ``None`` means depth-unknown — the
+    # book simulator then synthesizes from bid/ask. Upstox returns 5
+    # levels; ``bid``/``ask`` above mirror ``bids[0]``/``asks[0]``.
+    bids: tuple[tuple[float, int], ...] | None = None
+    asks: tuple[tuple[float, int], ...] | None = None
+
+    @property
+    def has_depth(self) -> bool:
+        """True when real multi-level depth is available on both sides."""
+        return bool(self.bids and self.asks)
 
     @property
     def mid(self) -> float | None:

@@ -181,7 +181,48 @@ class OrderBookSimulator:
             tick_size=tick_size,
         )
 
-    # ── Market-order walk ─────────────────────────────────────────────
+    def book_from_levels(
+        self,
+        symbol: str,
+        last: float,
+        bids: list[tuple[float, int]] | tuple[tuple[float, int], ...],
+        asks: list[tuple[float, int]] | tuple[tuple[float, int], ...],
+        tick_size: float,
+    ) -> OrderBook:
+        """Build a book from a provider's REAL depth ladder.
+
+        Uses the actual ``(price, size)`` levels the provider gave us
+        (Upstox delivers 5). If an order can consume more than the real
+        depth, we extend past the deepest real level with a synthetic
+        geometric tail (seeded from the last real size, spaced one tick
+        apart) so large orders still fill with a modeled cost instead of
+        hitting a wall. Everything up to the real depth is ground truth.
+        """
+        cfg = self.config
+
+        def build(levels: list[tuple[float, int]], descending: bool) -> list[BookLevel]:
+            out = [BookLevel(price=p, size=s) for p, s in levels if p and p > 0]
+            if not out:
+                return out
+            # Extend with a synthetic tail up to cfg.levels.
+            step = -tick_size if descending else tick_size
+            last_price = out[-1].price
+            last_size = max(1, out[-1].size)
+            for i in range(1, cfg.levels - len(out) + 1):
+                price = last_price + step * i
+                if price <= 0:
+                    break
+                size = max(1, int(round(last_size * (cfg.shape_decay ** i))))
+                out.append(BookLevel(price=price, size=size))
+            return out
+
+        return OrderBook(
+            symbol=symbol,
+            bids=build(list(bids), descending=True),
+            asks=build(list(asks), descending=False),
+            last=last,
+            tick_size=tick_size,
+        )
 
     def walk_book(
         self,

@@ -228,8 +228,14 @@ _UPSTOX_BODY = json.dumps(
                     "low": 2880.0, "close": 2920.0,
                 },
                 "depth": {
-                    "buy": [{"price": 2939.25, "quantity": 40, "orders": 2}],
-                    "sell": [{"price": 2940.75, "quantity": 35, "orders": 1}],
+                    "buy": [
+                        {"price": 2939.25, "quantity": 40, "orders": 2},
+                        {"price": 2939.00, "quantity": 60, "orders": 3},
+                    ],
+                    "sell": [
+                        {"price": 2940.75, "quantity": 35, "orders": 1},
+                        {"price": 2941.00, "quantity": 50, "orders": 2},
+                    ],
                 },
             },
         },
@@ -257,6 +263,10 @@ def test_upstox_parses_quote_with_depth(monkeypatch: pytest.MonkeyPatch) -> None
     assert q.volume == 777000
     assert q.source == "upstox"
     assert q.is_real_time is True
+    # Full 5-level ladder parsed (best-first, (price, size)).
+    assert q.has_depth is True
+    assert q.bids == ((2939.25, 40), (2939.00, 60))
+    assert q.asks == ((2940.75, 35), (2941.00, 50))
 
 
 def test_upstox_sends_non_default_user_agent(monkeypatch: pytest.MonkeyPatch) -> None:
