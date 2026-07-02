@@ -266,9 +266,12 @@ def _ladder(data: dict, side: str) -> tuple[tuple[float, int], ...] | None:
     out: list[tuple[float, int]] = []
     for lvl in levels:
         price = _f((lvl or {}).get("price"))
-        if price is None:
+        qty = _i((lvl or {}).get("quantity"))
+        # Skip padding levels with no real liquidity (price present but
+        # zero/blank size) so has_depth reflects genuine depth.
+        if price is None or not qty:
             continue
-        out.append((price, _i(lvl.get("quantity")) or 0))
+        out.append((price, qty))
     return tuple(out) or None
 
 

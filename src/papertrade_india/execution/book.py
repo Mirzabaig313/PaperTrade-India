@@ -170,7 +170,9 @@ class OrderBookSimulator:
         asks: list[BookLevel] = []
         for i in range(cfg.levels):
             size = max(1, int(round(top_size * (cfg.shape_decay ** i))))
-            bids.append(BookLevel(price=bid - i * tick_size, size=size))
+            bid_price = bid - i * tick_size
+            if bid_price > 0:  # never synthesize a non-positive bid (penny stocks)
+                bids.append(BookLevel(price=bid_price, size=size))
             asks.append(BookLevel(price=ask + i * tick_size, size=size))
 
         return OrderBook(
