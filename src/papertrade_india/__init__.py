@@ -89,6 +89,7 @@ from .execution.slippage import SlippageConfig, apply_slippage
 from .infrastructure.clock import Clock, ReplayClock, WallClock
 from .infrastructure.events import Event
 from .infrastructure.ledger import CashMovement
+from .infrastructure.holidays import UpstoxHolidayProvider
 from .infrastructure.market_hours import IST, NSECalendar, SessionPhase
 from .infrastructure.observability import BrokerEvent, EventBus, stdlib_log_subscriber
 from .infrastructure.symbols import SymbolEntry, SymbolMaster
@@ -152,6 +153,7 @@ __all__ = [
     # Calendar / time
     "IST",
     "NSECalendar",
+    "UpstoxHolidayProvider",
     # Price feed
     "CachedLastKnownProvider",
     "JugaadDataProvider",

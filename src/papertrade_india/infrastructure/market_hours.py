@@ -38,6 +38,10 @@ import logging
 from datetime import date, datetime, time, timedelta
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .holidays import UpstoxHolidayProvider
 
 try:
     from zoneinfo import ZoneInfo
@@ -80,12 +84,25 @@ class NSECalendar:
         Override the default data directory (mostly used in tests).
     """
 
-    def __init__(self, holidays_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        holidays_dir: Path | None = None,
+        holiday_provider: UpstoxHolidayProvider | None = None,
+    ) -> None:
         self.holidays_dir = (
             holidays_dir or Path(__file__).resolve().parent.parent / "data"
         )
         self._holidays: set[date] = set()
         self._load_holidays()
+        # Optional live source (Upstox published calendar). Augments the
+        # bundled JSON — the API's dates are added on top, and the JSON
+        # remains the offline floor if the API is unavailable. Default
+        # None keeps NSECalendar() fully offline (hermetic tests).
+        if holiday_provider is not None:
+            try:
+                self._holidays |= holiday_provider.closed_dates()
+            except Exception as e:  # noqa: BLE001 — never break the calendar
+                logger.warning("Live holiday provider failed: %s", e)
 
     # ── Loading ────────────────────────────────────────────────────────
 

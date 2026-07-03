@@ -58,7 +58,12 @@ def _load_env() -> None:
 def make_broker():
     """Broker with a resilient multi-provider feed (Upstox → yf → jugaad)."""
     _load_env()
-    from papertrade_india import quickstart, resilient_feed
+    from papertrade_india import (
+        NSECalendar,
+        UpstoxHolidayProvider,
+        quickstart,
+        resilient_feed,
+    )
     from papertrade_india.price_feed import JugaadDataProvider, YFinanceProvider
     from papertrade_india.providers import UpstoxInstrumentMaster, UpstoxProvider
 
@@ -70,6 +75,9 @@ def make_broker():
     providers += [YFinanceProvider("NS"), JugaadDataProvider()]
 
     feed = resilient_feed(providers)
+    # Live NSE holiday calendar (Upstox public API, cached, offline-safe
+    # fallback to the bundled JSON).
+    calendar = NSECalendar(holiday_provider=UpstoxHolidayProvider())
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     return quickstart(
         db_path=str(_DB_PATH),
@@ -77,6 +85,7 @@ def make_broker():
         enforce_market_hours=False,  # fill any time (incl. weekends)
         enforce_fresh_prices=False,
         price_feed=feed,
+        calendar=calendar,
     )
 
 

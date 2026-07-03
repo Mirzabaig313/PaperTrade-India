@@ -47,6 +47,7 @@ from .infrastructure.symbols import SymbolMaster
 from .presets import ZERODHA_DELIVERY
 
 if TYPE_CHECKING:
+    from .infrastructure.market_hours import NSECalendar
     from .price_feed import PriceFeed
 
 
@@ -62,6 +63,7 @@ def quickstart(
     enforce_market_hours: bool = True,
     enforce_fresh_prices: bool = True,
     price_feed: PriceFeed | None = None,
+    calendar: NSECalendar | None = None,
 ) -> IndiaPaperBroker:
     """Construct an opinionated, safe-by-default broker.
 
@@ -96,6 +98,7 @@ def quickstart(
         enforce_market_hours=enforce_market_hours,
         enforce_fresh_prices=enforce_fresh_prices,
         price_feed=price_feed,
+        calendar=calendar,
     )
 
     # Load the NSE-30 sample into the master if we constructed one.

@@ -17,6 +17,7 @@ from papertrade_india import (
     NSECalendar,
     OrderStatus,
     OrderType,
+    SessionPhase,
 )
 
 pytestmark = pytest.mark.integration
@@ -209,8 +210,11 @@ def test_market_order_outside_hours_raises(tmp_path, price_feed):
     reports closed, MARKET orders must be rejected."""
 
     class AlwaysClosed(NSECalendar):
-        def is_market_open(self, dt=None):
-            return False
+        # Override the method the submit path actually uses
+        # (current_phase), not is_market_open — otherwise the test's
+        # result depends on the real wall clock.
+        def current_phase(self, dt=None):
+            return SessionPhase.CLOSED
 
     broker = IndiaPaperBroker(
         initial_capital=1_000_000.0,
@@ -229,8 +233,11 @@ def test_limit_order_outside_hours_queues(tmp_path, price_feed):
     """Limit orders should still queue when the market is closed."""
 
     class AlwaysClosed(NSECalendar):
-        def is_market_open(self, dt=None):
-            return False
+        # Override the method the submit path actually uses
+        # (current_phase), not is_market_open — otherwise the test's
+        # result depends on the real wall clock.
+        def current_phase(self, dt=None):
+            return SessionPhase.CLOSED
 
     broker = IndiaPaperBroker(
         initial_capital=1_000_000.0,
