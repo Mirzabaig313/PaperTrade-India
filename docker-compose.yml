@@ -1,0 +1,47 @@
+# Production stack: the Streamlit app behind Caddy (auto-HTTPS + auth).
+#
+# Required env (set in a .env file next to this compose file, NOT committed):
+#   DOMAIN            e.g. paper.example.com  (must point at this droplet)
+#   BASIC_AUTH_USER   login username
+#   BASIC_AUTH_HASH   bcrypt hash from:  docker run --rm caddy caddy hash-password --plaintext 'yourpass'
+#   UPSTOX_ACCESS_TOKEN   your 1-year Upstox Analytics token
+#   (plus any LLM keys the broker/agent needs)
+
+services:
+  app:
+    build: .
+    env_file: .env          # passes UPSTOX_ACCESS_TOKEN etc. into the app
+    volumes:
+      - paper_data:/app/data # persists the SQLite paper book across deploys
+    expose:
+      - "8501"              # internal only; Caddy reaches it over the compose network
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.8            # pinned for reproducible builds
+    depends_on:
+      app:
+        condition: service_healthy  # don't route traffic until the app is up
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER}
+      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data    # persists TLS certificates
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  paper_data:
+  caddy_data:
+  caddy_config:

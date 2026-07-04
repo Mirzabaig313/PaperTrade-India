@@ -1,0 +1,17 @@
+# Keep the image small and never ship local state or secrets.
+.env
+data/
+.git/
+.github/
+.hypothesis/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+tests/
+docs/
+examples/
+*.db
+dist/
+build/
+*.egg-info/
