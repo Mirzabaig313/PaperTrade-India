@@ -33,7 +33,6 @@ Thumbs.db
 *.db-journal
 *.db-wal
 *.db-shm
-data/local/
+/data/
+/docs/local/
 examples/_local/
-papertrade-india/data
-papertrade-india/docs/local
