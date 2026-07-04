@@ -6,7 +6,7 @@ read it end-to-end in an afternoon — please do.
 ## Local setup
 
 ```bash
-git clone https://github.com/Mirzabaig313/papertrade-india
+git clone https://github.com/Mirzabaig313/PaperTrade-India
 python -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev,jugaad,cli,mcp]'
 ```
@@ -66,15 +66,16 @@ If your broker charges something the engine doesn't model:
 
 ## Refreshing the holiday calendar
 
-When NSE publishes the next year's calendar:
+Trading holidays are fetched live from the exchange-published API
+(`UpstoxHolidayProvider`) and cached, so most users never touch this.
+The bundled `src/papertrade_india/data/nse_holidays_*.json` files are the
+offline fallback. To refresh a fallback year:
 
 1. Extract the equity-segment holidays into a CSV with a single column
    `date` (`YYYY-MM-DD`).
 2. Run `python scripts/update_nse_holidays.py 2027 path/to/2027.csv`.
 3. The script writes `src/papertrade_india/data/nse_holidays_2027.json`.
-4. Update the snapshot test in `tests/unit/test_market_hours.py` to add
-   the new year's known dates.
-5. Open a PR with the JSON diff and the test update.
+4. Open a PR with the JSON diff.
 
 ## Adding a new broker adapter
 

@@ -28,6 +28,9 @@ env/
 .DS_Store
 Thumbs.db
 
+# Secrets
+.env
+
 # Local data and DBs created by examples/tests
 *.db
 *.db-journal
