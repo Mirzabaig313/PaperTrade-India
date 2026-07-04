@@ -18,7 +18,7 @@ from ..domain.exceptions import (
     MarketClosedError,
     RandomBrokerRejection,
 )
-from ..domain.models import Order, OrderSide, OrderStatus, OrderType, ProductType
+from ..domain.models import Order, OrderSide, OrderType, ProductType
 from ..domain.rules.risk import RiskContext
 from ..domain.rules.tick_lot_band import validate_band, validate_lot, validate_tick
 from ..infrastructure import idempotency as _idempotency
@@ -40,7 +40,7 @@ _QTY_EPSILON = 1e-9
 
 
 def submit_order(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     symbol: str,
     qty: float,
     side: OrderSide,
@@ -210,7 +210,7 @@ def submit_order(
 
 
 def _idempotency_replay(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     key: str,
     side: OrderSide,
     symbol: str,
@@ -252,7 +252,7 @@ def _idempotency_replay(
 
 
 def _idempotency_store(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     key: str,
     order_id: str,
     side: OrderSide,
@@ -272,7 +272,7 @@ def _idempotency_store(
                            ctx.now_iso())
 
 
-def _safe_last_price_for_risk(ctx: "BrokerContext", symbol: str) -> float:
+def _safe_last_price_for_risk(ctx: BrokerContext, symbol: str) -> float:
     """Best-effort price for risk-cap math. Falls back to 0.0."""
     try:
         return ctx.price_feed.get_price(symbol)
@@ -282,7 +282,7 @@ def _safe_last_price_for_risk(ctx: "BrokerContext", symbol: str) -> float:
 
 
 def _risk_check(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     side: OrderSide,
     symbol: str,
     qty: float,
@@ -322,7 +322,7 @@ def _risk_check(
 
 
 def _microstructure_check(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     symbol: str,
     qty: float,
     limit_price: float | None,
@@ -351,7 +351,7 @@ def _microstructure_check(
                     validate_band(p, prev_close, band_pct)
 
 
-def _safe_prev_close(ctx: "BrokerContext", symbol: str) -> float | None:
+def _safe_prev_close(ctx: BrokerContext, symbol: str) -> float | None:
     try:
         mq = ctx.price_feed.get_market_quote(symbol)
     except Exception as e:  # noqa: BLE001
@@ -360,7 +360,7 @@ def _safe_prev_close(ctx: "BrokerContext", symbol: str) -> float | None:
     return mq.prev_close
 
 
-def _t_plus_1_sellable_check(ctx: "BrokerContext", symbol: str, qty: float) -> None:
+def _t_plus_1_sellable_check(ctx: BrokerContext, symbol: str, qty: float) -> None:
     from ..domain.exceptions import InsufficientSharesError  # noqa: PLC0415
 
     with ctx.persistence.read() as conn:

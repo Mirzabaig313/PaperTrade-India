@@ -86,7 +86,6 @@ except Exception:  # noqa: BLE001
 
 from .upstox_instruments import UpstoxInstrumentMaster
 
-
 __all__ = [
     # Base interface
     "MarketDataProvider",

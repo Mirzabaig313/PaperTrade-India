@@ -25,8 +25,8 @@ import threading
 from typing import TYPE_CHECKING
 
 from ..domain.exceptions import OrderNoLongerPending, StalePriceRejected
-from ..infrastructure.market_hours import SessionPhase
 from ..domain.models import OrderSide, OrderStatus, OrderType
+from ..infrastructure.market_hours import SessionPhase
 
 if TYPE_CHECKING:  # avoid runtime circular import
     from .broker import IndiaPaperBroker

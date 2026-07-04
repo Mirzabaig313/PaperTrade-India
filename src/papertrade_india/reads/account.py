@@ -21,7 +21,7 @@ if TYPE_CHECKING:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 
-def summary(broker: "IndiaPaperBroker") -> Account:
+def summary(broker: IndiaPaperBroker) -> Account:
     """Build an :class:`Account` snapshot.
 
     Note on consistency: cash/realized_pl_total and pending-buy notional
@@ -66,7 +66,7 @@ def summary(broker: "IndiaPaperBroker") -> Account:
 
 
 def list_cash_movements(
-    broker: "IndiaPaperBroker", limit: int = 200,
+    broker: IndiaPaperBroker, limit: int = 200,
 ) -> list[_ledger.CashMovement]:
     """Recent cash-ledger rows for this account, newest first."""
     with broker.persistence.read() as conn:
@@ -74,7 +74,7 @@ def list_cash_movements(
 
 
 def verify_cash_invariant(
-    broker: "IndiaPaperBroker", tolerance: float = 0.01,
+    broker: IndiaPaperBroker, tolerance: float = 0.01,
 ) -> bool:
     """Assert ``account.cash == sum(cash_movements.amount)``.
 
@@ -111,7 +111,7 @@ def verify_cash_invariant(
 
 
 def list_events(
-    broker: "IndiaPaperBroker",
+    broker: IndiaPaperBroker,
     limit: int = 200,
     event_types: tuple[str, ...] | None = None,
 ) -> list[_events.Event]:
@@ -126,7 +126,7 @@ def list_events(
         )
 
 
-def current_session_phase(broker: "IndiaPaperBroker") -> "SessionPhase":
+def current_session_phase(broker: IndiaPaperBroker) -> SessionPhase:
     """The active NSE session phase at the broker's clock."""
     return broker.calendar.current_phase(broker.clock.now())
 

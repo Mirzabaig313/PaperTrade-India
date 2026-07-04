@@ -16,8 +16,8 @@ _warnings.warn(
     stacklevel=2,
 )
 
-from papertrade_india.infrastructure.market_hours import *  # noqa: E402, F401, F403
 import papertrade_india.infrastructure.market_hours as _src  # noqa: E402
+from papertrade_india.infrastructure.market_hours import *  # noqa: E402, F401, F403
 
 # Re-export every attribute defined on the new module — including
 # underscore-prefixed names — so callers that imported private symbols

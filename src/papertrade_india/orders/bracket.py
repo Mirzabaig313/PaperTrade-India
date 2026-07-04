@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 def queue(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     symbol: str,
     qty: float,
     side: OrderSide,

@@ -45,7 +45,7 @@ _QTY_EPSILON = 1e-9
 
 
 def record(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     conn: sqlite3.Connection,
     order_id: str,
     symbol: str,
@@ -104,7 +104,7 @@ def record(
 
 
 def record_trade(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     conn: sqlite3.Connection,
     order_id: str,
     symbol: str,
@@ -191,7 +191,7 @@ def row_to_order(row: sqlite3.Row) -> Order:
 
 
 def symbol_position_qty(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     conn: sqlite3.Connection,
     symbol: str,
 ) -> float:
@@ -204,7 +204,7 @@ def symbol_position_qty(
 
 
 def emit_position_events(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     conn: sqlite3.Connection,
     order: Order,
     qty_before: bool,
@@ -232,7 +232,7 @@ def emit_position_events(
 
 
 def apply_buy(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     conn: sqlite3.Connection,
     symbol: str,
     qty: float,
@@ -320,7 +320,7 @@ def apply_buy(
 
 
 def apply_sell(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     conn: sqlite3.Connection,
     symbol: str,
     qty: float,
@@ -404,7 +404,7 @@ def apply_sell(
 # ── Order lifecycle transitions ───────────────────────────────────────
 
 
-def cancel(ctx: "BrokerContext", order_id: str) -> bool:
+def cancel(ctx: BrokerContext, order_id: str) -> bool:
     """Cancel a pending or partially-filled order. Race-safe.
 
     Bracket-aware: if the cancelled order has children (bracket parent),
@@ -454,7 +454,7 @@ def cancel(ctx: "BrokerContext", order_id: str) -> bool:
     return cancelled
 
 
-def cancel_all(ctx: "BrokerContext") -> int:
+def cancel_all(ctx: BrokerContext) -> int:
     """Cancel every pending order on the account. Returns count."""
     with ctx.persistence.read() as conn:
         rows = conn.execute(
@@ -464,7 +464,7 @@ def cancel_all(ctx: "BrokerContext") -> int:
     return sum(1 for r in rows if cancel(ctx, r["id"]))
 
 
-def expire_day_orders(ctx: "BrokerContext") -> int:
+def expire_day_orders(ctx: BrokerContext) -> int:
     """Mark all PENDING DAY-tif orders as EXPIRED in one transaction.
 
     Call from a session-close hook. GTT and AMO orders are spared.
@@ -496,7 +496,7 @@ def expire_day_orders(ctx: "BrokerContext") -> int:
     return n
 
 
-def square_off_intraday(ctx: "BrokerContext") -> int:
+def square_off_intraday(ctx: BrokerContext) -> int:
     """Close all open INTRADAY positions at market.
 
     Called from the watcher at auto-square-off time. Each round-trip
@@ -517,7 +517,6 @@ def square_off_intraday(ctx: "BrokerContext") -> int:
         squared_targets = [(r["symbol"], float(r["net"])) for r in rows]
 
     # Import here to avoid a circular import at module load time.
-    from ..broker import IndiaPaperBroker  # noqa: PLC0415
 
     # We need the broker's sell() to route through the full pipeline.
     # square_off_intraday is called from the broker itself, so we
@@ -538,7 +537,7 @@ def square_off_intraday(ctx: "BrokerContext") -> int:
     return n
 
 
-def _square_off_one(ctx: "BrokerContext", symbol: str, qty: float) -> None:
+def _square_off_one(ctx: BrokerContext, symbol: str, qty: float) -> None:
     """Execute a single intraday square-off via the market execution path."""
     from .market import execute as _execute_market  # noqa: PLC0415
 
@@ -556,7 +555,7 @@ def _square_off_one(ctx: "BrokerContext", symbol: str, qty: float) -> None:
 
 
 def cancel_bracket_siblings(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     conn: sqlite3.Connection,
     filled_child: Order,
 ) -> None:
@@ -587,7 +586,7 @@ def cancel_bracket_siblings(
 
 
 def rebalance_bracket_sibling_qty(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     conn: sqlite3.Connection,
     filling_child: Order,
     filled_qty_so_far: float,

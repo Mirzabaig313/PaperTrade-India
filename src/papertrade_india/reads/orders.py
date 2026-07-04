@@ -16,7 +16,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 def list_all(
-    broker: "IndiaPaperBroker",
+    broker: IndiaPaperBroker,
     status: OrderStatus | None = None,
     limit: int = 100,
 ) -> list[Order]:
@@ -41,7 +41,7 @@ def list_all(
     return [broker._row_to_order(r) for r in rows]
 
 
-def get(broker: "IndiaPaperBroker", order_id: str) -> Order | None:
+def get(broker: IndiaPaperBroker, order_id: str) -> Order | None:
     """Fetch one order by id, scoped to the broker's account."""
     with broker.persistence.read() as conn:
         row = conn.execute(

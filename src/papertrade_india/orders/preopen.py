@@ -179,7 +179,7 @@ def compute_equilibrium(
     )
 
 
-def run(ctx: "BrokerContext") -> AuctionMatch:  # type: ignore[name-defined]
+def run(ctx: BrokerContext) -> AuctionMatch:  # type: ignore[name-defined]
     """Match all PENDING limit orders for this account at the equilibrium price.
 
     Called by the watcher at the PRE_OPEN → REGULAR transition (or

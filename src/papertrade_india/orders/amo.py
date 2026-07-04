@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def queue(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     symbol: str,
     qty: float,
     side: OrderSide,
@@ -64,7 +64,7 @@ def queue(
     return _state.row_to_order(row)
 
 
-def fire_pending(ctx: "BrokerContext") -> int:
+def fire_pending(ctx: BrokerContext) -> int:
     """Fill every pending AMO market order at the current price.
 
     Idempotent within a session: orders flip from PENDING to FILLED

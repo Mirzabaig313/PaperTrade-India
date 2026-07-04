@@ -25,8 +25,8 @@ from datetime import datetime
 from pathlib import Path
 
 from ..domain.exceptions import SymbolDelisted, SymbolNotFound
-from .market_hours import IST
 from ..domain.models import Exchange
+from .market_hours import IST
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS symbols (

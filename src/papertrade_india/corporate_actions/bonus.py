@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def apply(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     symbol: str,
     ratio_num: int,
     ratio_den: int = 1,

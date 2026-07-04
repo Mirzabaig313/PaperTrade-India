@@ -20,7 +20,7 @@ if TYPE_CHECKING:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 
-def mark_price(broker: "IndiaPaperBroker", symbol: str) -> tuple[float, str]:
+def mark_price(broker: IndiaPaperBroker, symbol: str) -> tuple[float, str]:
     """Resolve the mark-to-market price for a long position.
 
     Returns ``(price, basis)``:
@@ -47,7 +47,7 @@ def mark_price(broker: "IndiaPaperBroker", symbol: str) -> tuple[float, str]:
     return broker.price_feed.get_price(symbol), "last"
 
 
-def list_all(broker: "IndiaPaperBroker") -> list[Position]:
+def list_all(broker: IndiaPaperBroker) -> list[Position]:
     """Return every open position for the broker's account."""
     with broker.persistence.read() as conn:
         rows = conn.execute(
@@ -93,7 +93,7 @@ def list_all(broker: "IndiaPaperBroker") -> list[Position]:
     return positions
 
 
-def get(broker: "IndiaPaperBroker", symbol: str) -> Position | None:
+def get(broker: IndiaPaperBroker, symbol: str) -> Position | None:
     """Direct O(1) lookup against the (account_id, symbol) primary key."""
     with broker.persistence.read() as conn:
         row = conn.execute(
@@ -136,7 +136,7 @@ def get(broker: "IndiaPaperBroker", symbol: str) -> Position | None:
     )
 
 
-def basis_breakdown(broker: "IndiaPaperBroker", symbol: str) -> dict | None:
+def basis_breakdown(broker: IndiaPaperBroker, symbol: str) -> dict | None:
     """Return the open position's cost basis broken into principal vs fees.
 
     Useful for reconciling against a broker contract note: ``avg_cost``

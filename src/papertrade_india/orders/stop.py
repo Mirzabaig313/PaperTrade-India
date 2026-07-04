@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 def queue(
-    ctx: "BrokerContext",
+    ctx: BrokerContext,
     symbol: str,
     qty: float,
     side: OrderSide,
@@ -69,7 +69,7 @@ def queue(
     return _state.row_to_order(row)
 
 
-def trigger(ctx: "BrokerContext", order: Order, last_price: float) -> None:
+def trigger(ctx: BrokerContext, order: Order, last_price: float) -> None:
     """Convert a triggered STOP into a market or limit fill.
 
     Called by :class:`LimitOrderWatcher`. STOP_MARKET fires immediately
