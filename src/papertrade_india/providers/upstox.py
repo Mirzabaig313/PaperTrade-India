@@ -154,7 +154,7 @@ class UpstoxProvider(MarketDataProvider):
                 # Upstox sits behind Cloudflare, which bans the default
                 # ``Python-urllib/x.y`` UA (Error 1010) before auth is
                 # even evaluated. A descriptive client UA passes.
-                "User-Agent": "papertrade-india/0.1 (+https://github.com/your-org/papertrade-india)",
+                "User-Agent": "papertrade-india/0.1 (+https://github.com/Mirzabaig313/papertrade-india)",
             },
         )
         try:

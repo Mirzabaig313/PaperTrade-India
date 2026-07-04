@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 _URL = "https://api.upstox.com/v2/market/holidays"
 _DEFAULT_CACHE = Path("data/upstox_holidays_cache.json")
 # Cloudflare bans the default Python-urllib UA (Error 1010); use ours.
-_UA = "papertrade-india/0.1 (+https://github.com/your-org/papertrade-india)"
+_UA = "papertrade-india/0.1 (+https://github.com/Mirzabaig313/papertrade-india)"
 _MAX_BYTES = 4 * 1024 * 1024
 
 

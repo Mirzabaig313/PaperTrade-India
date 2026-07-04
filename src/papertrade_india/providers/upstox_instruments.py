@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 _NSE_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
 _DEFAULT_CACHE = Path("data/upstox_nse_instruments.json.gz")
 # Cloudflare bans the default Python-urllib UA (see UpstoxProvider).
-_UA = "papertrade-india/0.1 (+https://github.com/your-org/papertrade-india)"
+_UA = "papertrade-india/0.1 (+https://github.com/Mirzabaig313/papertrade-india)"
 # Guards against a compromised/swapped endpoint sending a huge payload
 # (decompression bomb / OOM). The real NSE file is ~2.3 MB gzipped.
 _MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024      # 64 MB compressed ceiling

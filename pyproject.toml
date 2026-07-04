@@ -3,7 +3,7 @@ requires = ["hatchling>=1.21"]
 build-backend = "hatchling.build"
 
 [project]
-name = "papertrade-india"
+name = "PaperTrade-India"
 version = "0.1.0.dev0"
 description = "Production-grade simulated broker for NSE/BSE paper trading"
 readme = "README.md"
@@ -90,11 +90,11 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-org/papertrade-india"
-Documentation = "https://github.com/your-org/papertrade-india#readme"
-Repository = "https://github.com/your-org/papertrade-india"
-Issues = "https://github.com/your-org/papertrade-india/issues"
-Changelog = "https://github.com/your-org/papertrade-india/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/Mirzabaig313/papertrade-india"
+Documentation = "https://github.com/Mirzabaig313/papertrade-india#readme"
+Repository = "https://github.com/Mirzabaig313/papertrade-india"
+Issues = "https://github.com/Mirzabaig313/papertrade-india/issues"
+Changelog = "https://github.com/Mirzabaig313/papertrade-india/blob/main/CHANGELOG.md"
 
 [project.scripts]
 papertrade-india = "papertrade_india.cli:app"

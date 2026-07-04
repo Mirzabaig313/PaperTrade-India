@@ -1,4 +1,4 @@
-# papertrade-india — Quickstart & Usage Guide
+# PaperTrade-India — Quickstart & Usage Guide
 
 Hands-on examples for every feature. For the project overview, feature
 list, and fee model, see the [README](README.md).
