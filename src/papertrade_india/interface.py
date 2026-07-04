@@ -1,8 +1,9 @@
 """Abstract broker interface.
 
-The agent talks to brokers exclusively through ``BrokerInterface``. This
-keeps the US (Alpaca) and India (this package, IBKR India later, Zerodha
-Kite later) brokers swappable without touching agent code.
+Callers talk to brokers exclusively through ``BrokerInterface``, which
+keeps different broker backends (this NSE/BSE paper broker, an
+Alpaca-style US adapter, a live Zerodha/IBKR adapter, ...) swappable
+without touching caller code.
 
 Notes on the contract:
 
@@ -28,7 +29,7 @@ from .domain.models import Account, Order, OrderStatus, OrderType, Position
 
 
 class BrokerInterface(ABC):
-    """Common interface for all brokers (Alpaca, India Paper, IBKR, Zerodha)."""
+    """Common interface for all broker backends (paper, live, adapters)."""
 
     # ── Order placement ────────────────────────────────────────────────
 

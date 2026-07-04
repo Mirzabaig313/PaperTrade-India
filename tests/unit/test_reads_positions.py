@@ -1,4 +1,4 @@
-"""Subsystem test for reads/positions (architecture_refactor.md Phase 8).
+"""Subsystem test for reads/positions.
 
 Exercises the extracted ``reads.positions.mark_price`` mark-to-market
 basis logic WITHOUT constructing ``IndiaPaperBroker`` — it uses a tiny

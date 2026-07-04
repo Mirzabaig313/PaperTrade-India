@@ -4,14 +4,14 @@ papertrade_india
 
 Production-grade simulated broker for NSE/BSE paper trading.
 
-A drop-in replacement for ``TradingService`` (Alpaca): same method
-signatures, same dataclass-shaped return values, no agent-side changes
-when switching markets.
+Exposes an Alpaca-style interface (same method signatures and
+dataclass-shaped return values), so callers can swap brokers without
+reshaping their code.
 
 Public API
 ----------
 - :class:`IndiaPaperBroker` — the broker
-- :class:`BrokerInterface` — ABC that this broker and Alpaca-style adapters implement
+- :class:`BrokerInterface` — ABC that this broker and other adapters implement
 - Models: :class:`Position`, :class:`Order`, :class:`Account`, :class:`Trade`
 - Enums: :class:`OrderType`, :class:`OrderSide`, :class:`OrderStatus`, :class:`Exchange`
 - Fee config: :class:`FeeConfig`, :class:`IndianFeeEngine`, :class:`FeeBreakdown`
@@ -182,7 +182,7 @@ __all__ = [
     "UpstoxProvider",
     # Background workers
     "LimitOrderWatcher",
-    # Tier-1: slippage / risk / symbols
+    # Slippage / risk / symbols
     "SlippageConfig",
     "apply_slippage",
     "RiskConfig",
@@ -191,21 +191,21 @@ __all__ = [
     "SymbolMaster",
     "SymbolEntry",
     "WatchlistStore",
-    # Tier-2: ledger / corporate actions
+    # Ledger / corporate actions
     "CashMovement",
     "CorporateAction",
-    # Tier-3: partial fills / events / observability
+    # Partial fills / events / observability
     "PartialFillConfig",
     "Event",
     "BrokerEvent",
     "EventBus",
     "stdlib_log_subscriber",
-    # Tier-A: clocks / quickstart
+    # Clocks / quickstart
     "Clock",
     "WallClock",
     "ReplayClock",
     "quickstart",
-    # Tier-4: realism extensions
+    # Realism extensions
     "MicrostructureConfig",
     "OrderBookConfig",
     "OrderBookSimulator",
@@ -220,7 +220,7 @@ __all__ = [
     "RejectionConfig",
     "RejectionSimulator",
     "RejectScenario",
-    # Tier-5: pre-open auction
+    # Pre-open auction
     "AuctionMatch",
     "compute_equilibrium",
     # Exceptions

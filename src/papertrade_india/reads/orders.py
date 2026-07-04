@@ -2,8 +2,7 @@
 
 Like the rest of :mod:`reads`, helpers take the broker as their first
 argument and never mutate state. Row-to-:class:`Order` mapping lives on
-the broker for now (it'll move to :mod:`orders.state` in the Phase 4
-extraction); we delegate to it here.
+the broker; we delegate to it here.
 """
 
 from __future__ import annotations

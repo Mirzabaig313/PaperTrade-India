@@ -1,7 +1,7 @@
 """NSE/BSE trading hours and holiday calendar.
 
 We enforce that market orders submitted outside trading hours are rejected
-(or queued, in the case of limit orders). Without this, an agent's
+(or queued, in the case of limit orders). Without this, a caller's
 back-of-the-envelope P&L would silently drift from reality.
 
 Hours used:
@@ -18,8 +18,8 @@ current via PR.
 Time zone: Asia/Kolkata (IST). IST does not observe DST, so this is just
 UTC+5:30 year-round.
 
-Session phases (Tier 3)
------------------------
+Session phases
+--------------
 The simulator models four phases per trading day:
 - ``CLOSED``: outside any session window.
 - ``PRE_OPEN``: 09:00–09:08, limit orders queue, no continuous fills.

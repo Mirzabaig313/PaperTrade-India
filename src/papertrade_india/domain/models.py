@@ -3,10 +3,10 @@
 Strict typing, immutable dataclasses (``frozen=True``). The broker mutates
 state via the persistence layer — domain objects themselves are values.
 
-These shapes are intentionally close to the Alpaca-side dataclasses so an
-agent that consumes either type sees a familiar interface. The differences
-(``exchange``, ``fees_paid``, ``realized_pl``) are India-specific additions
-that wouldn't fit on the Alpaca side.
+These shapes are intentionally close to Alpaca's dataclasses so a caller
+that consumes either type sees a familiar interface. The differences
+(``exchange``, ``fees_paid``, ``realized_pl``) are India-specific
+additions.
 """
 
 from __future__ import annotations

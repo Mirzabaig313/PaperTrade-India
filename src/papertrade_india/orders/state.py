@@ -139,7 +139,7 @@ def record_trade(
 def row_to_order(row: sqlite3.Row) -> Order:
     """Hydrate an :class:`Order` from a SQLite row.
 
-    Handles legacy rows that lack Tier-4 columns gracefully.
+    Handles legacy rows that lack the newer realism columns gracefully.
     """
     cols = set(row.keys())
     return Order(
@@ -522,8 +522,6 @@ def square_off_intraday(ctx: "BrokerContext") -> int:
     # We need the broker's sell() to route through the full pipeline.
     # square_off_intraday is called from the broker itself, so we
     # reconstruct the call via the context's back-reference.
-    # This is a temporary bridge until the full order pipeline moves
-    # to ctx-based functions (Phase 4d).
     n = 0
     for symbol, qty in squared_targets:
         try:

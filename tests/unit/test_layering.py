@@ -1,9 +1,9 @@
-"""Architectural layering test (architecture_refactor.md Phase 6).
+"""Architectural layering test.
 
-Enforces the dependency direction of the post-refactor package so the
-god-class never quietly grows back. We parse each module with ``ast``
-and inspect its **runtime, module-level** internal imports — that is,
-we deliberately ignore:
+Enforces the dependency direction of the package so the god-class never
+quietly grows back. We parse each module with ``ast`` and inspect its
+**runtime, module-level** internal imports — that is, we deliberately
+ignore:
 
   - imports inside ``if TYPE_CHECKING:`` blocks (type-only, no runtime
     dependency), and
@@ -11,7 +11,7 @@ we deliberately ignore:
     breaking import cycles, e.g. a read helper that needs the broker
     type at call time).
 
-Invariants checked (see architecture_refactor.md §3-§5):
+Invariants checked:
 
   domain/            → may import only domain/
   infrastructure/    → may import domain/, infrastructure/

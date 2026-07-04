@@ -134,7 +134,7 @@ def test_random_op_sequence_preserves_equity_invariant(tmp_path):
     must hold (within a paise of float drift).
 
     Rejected ops (insufficient funds / shares) are caught and ignored —
-    a real agent's strategy code would also handle them.
+    a real strategy would also handle them.
     """
     universe = {
         "RELIANCE": 2500.0, "INFY": 1800.0, "TCS": 4000.0,

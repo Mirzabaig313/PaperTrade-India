@@ -1,8 +1,8 @@
 """IndiaPaperBroker — thin orchestrator over cohesive subsystems.
 
-Drop-in replacement for an Alpaca-style ``TradingService``: same method
-signatures, same dataclass-shaped return values. Plug into a broker router
-keyed on ``market`` and the agent's call sites don't change.
+Exposes an Alpaca-style interface (same method signatures and
+dataclass-shaped return values), so it can sit behind a broker router
+keyed on ``market`` and callers don't change their code across brokers.
 
 Architecture
 ------------
@@ -17,8 +17,6 @@ This class is a façade. Every method delegates to a subsystem module:
 - Read-only views → :mod:`reads.positions`, :mod:`reads.account`, :mod:`reads.orders`
 - Corporate actions → :mod:`corporate_actions.splits` etc.
 - Shared collaborators → :class:`_context.BrokerContext`
-
-See ``docs/architecture_refactor.md`` for the full design rationale.
 """
 
 from __future__ import annotations
@@ -131,8 +129,7 @@ class IndiaPaperBroker(BrokerInterface):
           - ``strict_open=False`` (default): create it with ``initial_capital``.
           - ``strict_open=True``: raise ``AccountNotFoundError``.
 
-        See the class docstring and ``docs/architecture_refactor.md`` for
-        the full parameter reference.
+        See the class docstring for the design overview.
         """
         self.account_id = account_id
         self.default_exchange = exchange

@@ -15,7 +15,7 @@ from papertrade_india import (
 def _legacy_broker(tmp_path, price_feed, **kwargs):
     """Construct a broker with realism layers off so we can isolate slippage.
 
-    The Tier-4 defaults (synthetic order book, T+1, mark-to-bid, latency,
+    The realism defaults (synthetic order book, T+1, mark-to-bid, latency,
     rejection, default-on slippage, partial fills) all interact with
     fill prices. To exercise the slippage model in isolation we disable
     them. Realism-aware tests live in
@@ -172,7 +172,7 @@ def test_default_broker_has_zero_slippage(tmp_path, stub_provider, price_feed):
 
 
 
-# ── Tier-3: per-symbol overrides ─────────────────────────────────────
+# ── Per-symbol overrides ─────────────────────────────────────────────
 
 
 def test_per_symbol_bps_overrides_default():

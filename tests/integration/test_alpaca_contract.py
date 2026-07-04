@@ -1,14 +1,9 @@
-"""Contract test: ``IndiaPaperBroker`` is shape-compatible with Alpaca's
-``TradingService``.
+"""Contract test: ``IndiaPaperBroker`` keeps an Alpaca-style shape.
 
-The package's value proposition is "drop-in replacement for Alpaca's
-TradingService — same method signatures." This test pins that claim.
-
-We can't import ``TradingService`` itself (it lives in the parent
-``hedge-fund-agent`` repo, not the package), so we encode its public
-shape as a fixture here. If Alpaca's surface changes, this test is
-where you'd update it — and you'd see in one place exactly which
-methods the package needs to keep matching.
+The package advertises an Alpaca-style interface (same method
+signatures), so downstream code can swap brokers without changes. This
+test pins that claim by encoding Alpaca's public broker shape as a
+fixture and checking the broker stays compatible with it.
 
 What we check
 -------------
@@ -20,9 +15,10 @@ For each method on the contract:
   - The optional parameters Alpaca offers are also offered (so a
     caller passing them through doesn't break).
 
-We deliberately don't check *exact* signatures — Tier-1+ added params
-(``idempotency_key``, ``time_in_force``) that Alpaca doesn't have, and
-that's fine: we're a drop-in replacement *up to* additive extensions.
+We deliberately don't check *exact* signatures — this package adds
+params Alpaca doesn't have (``idempotency_key``, ``time_in_force``,
+``product_type``, ...), and that's fine: compatibility holds *up to*
+additive extensions.
 """
 
 from __future__ import annotations
@@ -33,7 +29,7 @@ import pytest
 
 from papertrade_india import IndiaPaperBroker
 
-# Encoded contract: Alpaca's TradingService methods that an agent uses.
+# Encoded contract: the Alpaca-style broker methods callers rely on.
 # Shape: { method_name: { "required": [params], "optional": [params] } }
 ALPACA_CONTRACT: dict[str, dict[str, list[str]]] = {
     "buy": {
@@ -83,7 +79,7 @@ def _params(method) -> dict[str, inspect.Parameter]:
 def test_method_exists(method_name: str):
     assert hasattr(IndiaPaperBroker, method_name), (
         f"IndiaPaperBroker is missing the {method_name!r} method "
-        f"that Alpaca's TradingService exposes"
+        f"that an Alpaca-style broker exposes"
     )
 
 
@@ -92,8 +88,8 @@ def test_required_params_are_a_subset(method_name: str):
     """India broker must accept all of Alpaca's required params.
 
     "Subset" because the India broker may have *additional* required
-    params (none today) — the test catches the regression where an
-    agent's existing call site stops working because we tightened
+    params (none today) — the test catches the regression where a
+    caller's existing call site stops working because we tightened
     something. We never tighten requirements.
     """
     contract = ALPACA_CONTRACT[method_name]
@@ -106,8 +102,8 @@ def test_required_params_are_a_subset(method_name: str):
             f"missing from IndiaPaperBroker.{method_name} signature: "
             f"{list(params)}"
         )
-        # And it should still be passable positionally — the agent's
-        # call sites use positional args.
+        # And it should still be passable positionally — callers
+        # commonly use positional args.
         p = params[required]
         assert p.kind in (
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
@@ -136,10 +132,10 @@ def test_optional_params_present(method_name: str):
 
 def test_buy_returns_order(broker, stub_provider):
     """Smoke check the runtime contract: buy returns an Order with the
-    fields the agent reads off Alpaca's order objects."""
+    fields an Alpaca-style caller reads off order objects."""
     stub_provider.set("RELIANCE", 1000)
     order = broker.buy("RELIANCE", 1)
-    # These are the attributes the agent's TradingService consumers use.
+    # These are the attributes Alpaca-style order consumers use.
     for attr in ("id", "symbol", "qty", "status", "filled_qty",
                  "filled_avg_price", "created_at"):
         assert hasattr(order, attr), f"Order missing {attr!r}"

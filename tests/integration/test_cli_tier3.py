@@ -1,4 +1,4 @@
-"""Smoke tests for the Tier-3 CLI commands.
+"""Smoke tests for the observability CLI commands.
 
 These run the CLI through Typer's test runner against a real on-disk
 SQLite file under ``tmp_path``. We don't shell out — the goal is to
