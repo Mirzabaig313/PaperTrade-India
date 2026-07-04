@@ -6,7 +6,7 @@ read it end-to-end in an afternoon — please do.
 ## Local setup
 
 ```bash
-git clone https://github.com/your-org/papertrade-india
+git clone https://github.com/Mirzabaig313/papertrade-india
 python -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev,jugaad,cli,mcp]'
 ```
@@ -27,9 +27,9 @@ mypy src
 RUN_E2E=1 pytest -m e2e
 ```
 
-A clean run is **~80 tests in well under a second**. If you add a test
-that pushes the wall-clock past a few seconds, it probably belongs in
-`tests/e2e/` (opt-in) instead of the default suite.
+The default suite is hermetic (no network) and runs in a few seconds. If
+you add a test that needs the network or pushes the wall-clock up
+noticeably, it probably belongs in `tests/e2e/` (opt-in) instead.
 
 ## Coding style
 
