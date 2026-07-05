@@ -132,11 +132,45 @@ Runnable scripts are in [`examples/`](examples/).
 
 ## Configuration
 
-Provide your own broker credentials and data-provider keys via a `.env`
-file — see [`.env.example`](.env.example). Everything is optional: with no
-keys set, the broker uses the free `yfinance → jugaad-data` fallback chain
-and works out of the box. API keys unlock live broker feeds and
-higher-rate data sources.
+Most providers and live broker feeds need an API key or token. Everything
+is optional — with no keys set, the broker uses the free
+`yfinance → jugaad-data` fallback chain and works out of the box. There
+are three ways to supply credentials:
+
+**1. Pass them directly to the provider** (most explicit — no env needed):
+
+```python
+from papertrade_india import IndiaPaperBroker, resilient_feed
+from papertrade_india.providers import UpstoxProvider, UpstoxInstrumentMaster
+
+feed = resilient_feed([
+    UpstoxProvider(access_token="your-token", resolve=UpstoxInstrumentMaster().resolve),
+])
+broker = IndiaPaperBroker(price_feed=feed)
+```
+
+Every provider accepts its key this way: `FinnhubProvider(api_key=...)`,
+`DhanProvider(client_id=..., access_token=...)`,
+`KiteProvider(api_key=..., access_token=...)`, and so on.
+
+**2. Set an environment variable** — every provider falls back to it:
+
+```bash
+export UPSTOX_ACCESS_TOKEN="your-token"
+python your_script.py
+```
+
+The variable names are listed in [`.env.example`](.env.example) (e.g.
+`UPSTOX_ACCESS_TOKEN`, `FINNHUB_API_KEY`, `ALPHA_VANTAGE_API_KEY`,
+`DHAN_CLIENT_ID` / `DHAN_ACCESS_TOKEN`).
+
+**3. Use a `.env` file** — the library doesn't read `.env` automatically,
+so load it yourself with [python-dotenv](https://pypi.org/project/python-dotenv/):
+
+```python
+from dotenv import load_dotenv
+load_dotenv()   # copy .env.example to .env and fill in your keys
+```
 
 ## Fee model
 
