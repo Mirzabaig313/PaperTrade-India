@@ -306,14 +306,19 @@ def test_replay_dispatches_persisted_events_chronologically(
 def test_replay_respects_since_filter(broker, stub_provider):
     from datetime import datetime, timedelta
 
+    from papertrade_india import IST
+
     stub_provider.set("RELIANCE", 1000)
     broker.buy("RELIANCE", 1)
 
     received: list[BrokerEvent] = []
     broker.events.subscribe(received.append)
 
+    # Events are stamped with datetime.now(IST). Use the same IST-aware
+    # basis here — a naive datetime.now() is the host's local tz and
+    # would misfilter on a UTC CI runner.
     n = broker.events.replay_from_broker(
-        broker, since=datetime.now() + timedelta(hours=1),
+        broker, since=datetime.now(IST) + timedelta(hours=1),
     )
     assert n == 0
     assert received == []
